@@ -2,7 +2,6 @@ using Core.Common;
 using Core.DI;
 using R3;
 using UnityEngine;
-using UnityEngine.InputSystem;
 
 namespace Core.Interaction
 {
@@ -41,6 +40,29 @@ namespace Core.Interaction
             }
         }
 
+        /// <summary>
+        /// Привязка через GameInput (новая система ввода Unity)
+        /// </summary>
+        public void Bind(Core.Input.GameInput gameInput, DIContainer root)
+        {
+            _root = root;
+            
+            if (gameInput?.Actions?.Player?.Interact != null)
+            {
+                _clickAction = gameInput.Actions.Player.Interact;
+                _clickAction.performed += OnClick;
+                CoreLog.Debug($"[MouseInteractor] привязан к экшену Player.Interact, enabled={_clickAction.enabled}");
+            }
+            else
+            {
+                Debug.LogWarning("[MouseInteractor] Экшен Player.Interact не найден в GameInput");
+            }
+        }
+
+        /// <summary>
+        /// Старый метод Bind для обратной совместимости (помечен как устаревший)
+        /// </summary>
+        [System.Obsolete("Используйте Bind(GameInput, DIContainer) вместо этого метода")]
         public void Bind(InputAction clickAction, DIContainer root)
         {
             _root = root;

@@ -5,7 +5,6 @@ using Core.Signals;
 using Core.State;
 using R3;
 using UnityEngine;
-using UnityEngine.InputSystem;
 
 namespace Core.Boot
 {
@@ -13,14 +12,23 @@ namespace Core.Boot
     /// Bootstrap игровой сцены. Вся инициализация вынесена в Initializer/IInitStep:
     /// чтобы подключить новую механику, ты просто добавляешь её шаг в BuildInitializer()
     /// (или регистрируешь список шагов извне) — тело bootstrap-а трогать не нужно.
-    ///
+    /// 
+    /// Поддерживает два режима:
+    /// 1) Классический режим с игроком (ThirdPerson/FirstPerson) - спавнится префаб игрока
+    /// 2) Point-and-click режим - игрок не спавнится, управление камерой и мышью напрямую
+    /// 
     /// Наружу возвращает поток сигналов перехода (выход в меню / переход на сцену / выход).
     /// </summary>
     public class GameplayBootstrap : SceneBootstrapBase
     {
-        [Header("Player")]
+        [Header("Player (для классического режима)")]
         [SerializeField] private PlayerMovement _playerPrefab;
         [SerializeField] private Core.Stats.StatDefinition _staminaStat; // стат выносливости для движения
+        
+        [Header("Point-and-Click режим")]
+        [Tooltip("Если true, игрок не спавнится, используется камера с управлением мышью")]
+        [SerializeField] private bool _pointAndClickMode = false;
+        [SerializeField] private Camera _pointAndClickCameraPrefab; // опционально, можно использовать камеру сцены
 
         // Объекты, которые этот bootstrap создал и должен убрать при уничтожении сцены.
         private readonly List<GameObject> _spawned = new();
@@ -71,12 +79,36 @@ namespace Core.Boot
             // Фазы: активация текущей фазы на сцене (спавн наполнения), Order 9.
             initializer.Add(new Core.Story.Phases.PhaseInitStep());
 
-            // Игрок: спавн по spawnId + ввод + сохранение позиции.
-            var input = ctx.Root.Resolve<Core.Input.GameInput>();
-            initializer.Add(new PlayerInitStep(_playerPrefab, input.Actions.Player.Move, input.Actions.Player.Look, input.Actions.Player.Interact, _staminaStat));
+            // Выбор режима инициализации: классический игрок или point-and-click
+            if (_pointAndClickMode)
+            {
+                // Point-and-click режим: без игрока, управление камерой и мышью
+                Debug.Log("[GameplayBootstrap] Инициализация point-and-click режима");
+                
+                var input = ctx.Root.Resolve<Core.Input.GameInput>();
+                
+                // Инициализация взаимодействия через клик мыши
+                initializer.Add(new ClickInteractionInitStep(input));
+                
+                // Камера для point-and-click (если назначена или нужно создать)
+                if (_pointAndClickCameraPrefab != null)
+                {
+                    var cameraGo = Instantiate(_pointAndClickCameraPrefab.gameObject);
+                    _spawned.Add(cameraGo);
+                    DontDestroyOnLoad(cameraGo);
+                }
+            }
+            else
+            {
+                // Классический режим с игроком
+                Debug.Log("[GameplayBootstrap] Инициализация классического режима с игроком");
+                
+                var input = ctx.Root.Resolve<Core.Input.GameInput>();
+                initializer.Add(new PlayerInitStep(_playerPrefab, input.Actions.Player.Move, input.Actions.Player.Look, input.Actions.Player.Interact, _staminaStat));
 
-            // Камера: привязка Cinemachine к игроку (после спавна игрока).
-            initializer.Add(new CameraInitStep());
+                // Камера: привязка Cinemachine к игроку (после спавна игрока).
+                initializer.Add(new CameraInitStep());
+            }
 
             // Инвентарь: загрузка из снапшота + регистрация в сохранении.
             initializer.Add(new Core.Inventory.InventoryInitStep());
@@ -109,12 +141,16 @@ namespace Core.Boot
             pause.Subscribe(_ =>
             {
                 input.SwitchToUI();
-                if (ctx.Scene.TryResolve<Core.Player.PlayerLook>(out var look)) look.SetEnabled(false);
+                // В point-and-click режиме PlayerLook не используется
+                if (!_pointAndClickMode && ctx.Scene.TryResolve<Core.Player.PlayerLook>(out var look)) 
+                    look.SetEnabled(false);
             }).AddTo(_sceneDisposables);
             cont.Subscribe(_ =>
             {
                 input.SwitchToPlayer();
-                if (ctx.Scene.TryResolve<Core.Player.PlayerLook>(out var look)) look.SetEnabled(true);
+                // В point-and-click режиме PlayerLook не используется
+                if (!_pointAndClickMode && ctx.Scene.TryResolve<Core.Player.PlayerLook>(out var look)) 
+                    look.SetEnabled(true);
             }).AddTo(_sceneDisposables);
         }
 
