@@ -1,0 +1,50 @@
+// ШАБЛОН — как добавить новую механику в инициализацию.
+// Переименуй, убери расширение .txt, положи в свой модуль механики.
+//
+// Идея: механика поставляется как самодостаточный кусок:
+//   1) свои поля в GameStateData (для снапшота),
+//   2) свой сервис (в root или scene контейнере),
+//   3) свой IInitStep, который всё связывает,
+//   4) при желании — IStateContributor, чтобы попадать в сохранение.
+//
+// Тогда включение механики = добавить одну строку в GameplayBootstrap.BuildInitializer().
+
+using Core.Init;
+using Core.State;
+using UnityEngine;
+
+namespace Core.Init.Examples
+{
+    public class ExampleMechanicInitStep : IInitStep
+    {
+        // Порядок относительно других шагов (0 = спавны, ставь механики после нужных зависимостей).
+        public int Order => 100;
+
+        public void Execute(InitContext ctx)
+        {
+            // 1. Достаём нужные зависимости из контейнеров.
+            // var stateService = ctx.Root.Resolve<GameStateService>();
+            // var input        = ctx.Root.Resolve<InputManager>();
+
+            // 2. Достаём данные механики из снапшота.
+            // var myData = ctx.State.myMechanicData;
+
+            // 3. Находим/создаём объекты на сцене и биндим их.
+            // var controller = Object.FindAnyObjectByType<MyController>();
+            // controller.Bind(myData, input);
+
+            // 4. Если механика должна сохраняться — регистрируем контрибьютора.
+            // stateService.RegisterContributor(new MyMechanicStateContributor(controller));
+
+            Debug.Log("[ExampleMechanicInitStep] выполнен");
+        }
+    }
+
+    // Пример контрибьютора снапшота:
+    // public class MyMechanicStateContributor : IStateContributor
+    // {
+    //     private readonly MyController _controller;
+    //     public MyMechanicStateContributor(MyController c) => _controller = c;
+    //     public void CaptureInto(GameStateData state) => state.myMechanicData = _controller.ExtractData();
+    // }
+}
