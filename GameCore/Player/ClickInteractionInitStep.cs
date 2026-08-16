@@ -1,7 +1,6 @@
 using Core.Init;
 using Core.Interaction;
 using UnityEngine;
-using UnityEngine.InputSystem;
 
 namespace Core.Player
 {
@@ -11,18 +10,17 @@ namespace Core.Player
     /// Создаёт/находит MouseInteractor на сцене, биндит ввод (клик мыши) и связывает
     /// с ClickInteractionHUD для отображения подсказок.
     /// 
-    /// Используется вместо PlayerInitStep когда игрок не спавнится, а управление идёт
-    /// напрямую камерой и мышью.
+    /// Использует новую систему ввода GameInput вместо прямых InputAction.
     /// </summary>
     public class ClickInteractionInitStep : IInitStep
     {
         public int Order => 15;
 
-        private readonly InputAction _clickAction;
+        private readonly Core.Input.GameInput _gameInput;
 
-        public ClickInteractionInitStep(InputAction clickAction)
+        public ClickInteractionInitStep(Core.Input.GameInput gameInput)
         {
-            _clickAction = clickAction;
+            _gameInput = gameInput;
         }
 
         public void Execute(InitContext ctx)
@@ -37,9 +35,11 @@ namespace Core.Player
                 interactor = go.AddComponent<MouseInteractor>();
             }
 
-            // Биндим клик
-            interactor.Bind(_clickAction, ctx.Root);
-            Debug.Log("[ClickInteractionInitStep] MouseInteractor привязан к клику");
+            // Биндим клик через новую систему ввода
+            // Используем экшен Interact из карты Player
+            var clickAction = _gameInput.Actions.Player.Interact;
+            interactor.Bind(clickAction, ctx.Root);
+            Debug.Log("[ClickInteractionInitStep] MouseInteractor привязан к клику через GameInput");
 
             // Связываем с HUD
             var hud = Object.FindAnyObjectByType<ClickInteractionHUD>(FindObjectsInactive.Include);

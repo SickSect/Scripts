@@ -8,13 +8,55 @@
 - Взаимодействие с объектами происходит по клику мыши
 - При наведении на интерактивные объекты показывается подсказка с действием
 
-## Новые компоненты
+**Важно:** Система использует новую систему ввода Unity (Input System) через обёртку `GameInput`.
+
+---
+
+## Быстрая настройка (пошаговая инструкция)
+
+### Шаг 1: Настройка GameplayBootstrap
+
+1. Найдите префаб `GameplayBootstrap` в `Resources/Core/GameplayBootstrap`
+2. В инспекторе найдите поле **Point-and-Click режим**
+3. Установите галочку `_pointAndClickMode = true`
+4. (Опционально) Назначьте префаб камеры в `_pointAndClickCameraPrefab`, если хотите использовать специальный префаб
+
+### Шаг 2: Настройка сцены
+
+1. **Удалите игрока со сцены** (если он там есть)
+2. **Настройте камеру:**
+   - Добавьте компонент `PointAndClickCamera` на основную камеру
+   - Или используйте обычную камеру с ручной настройкой позиции
+3. **Добавьте MouseInteractor:**
+   - Создайте пустой GameObject или добавьте на камеру
+   - Добавьте компонент `MouseInteractor`
+   - Настройте `Interactable Mask` для слоя интерактивных объектов
+4. **Настройте UI подсказок:**
+   - На Canvas создайте элемент для подсказки (RectTransform + TMP_Text)
+   - Добавьте компонент `ClickInteractionHUD`
+   - Назначьте `Hint Root` и `Hint Label` в инспекторе
+
+### Шаг 3: Проверка Input System
+
+Убедитесь, что в вашем Input Action Asset есть действие:
+- Карта: `Player`
+- Действие: `Interact` (тип Button, привязка к левой кнопке мыши)
+
+### Шаг 4: Запуск
+
+Запустите игру — камера должна управляться мышью и клавишами WASD, а при наведении на интерактивные объекты должны появляться подсказки.
+
+---
+
+## Новые/обновлённые компоненты
 
 ### 1. MouseInteractor (`Core.Interaction.MouseInteractor`)
 
 **Расположение:** `/GameCore/Interaction/MouseInteractor.cs`
 
 **Описание:** Обрабатывает взаимодействие через клик мышкой. Пускает рейкаст из камеры в точку курсора и вызывает `Interact()` на объектах с `IInteractable`.
+
+**Обновление:** Теперь поддерживает новый метод `Bind(GameInput, DIContainer)` для работы с системой ввода через `GameInput`.
 
 **Как использовать:**
 1. Добавьте компонент на пустой GameObject на сцене или на камеру
@@ -29,7 +71,8 @@
 - `HoveredPrompt` — ReactiveProperty с текстом подсказки
 
 **Методы:**
-- `Bind(InputAction clickAction, DIContainer root)` — привязка к действию клика
+- `Bind(GameInput gameInput, DIContainer root)` — **новый метод** для привязки через GameInput
+- `Bind(InputAction clickAction, DIContainer root)` — устаревший метод для обратной совместимости
 
 ---
 
@@ -80,37 +123,31 @@
 
 **Описание:** InitStep для инициализации системы point-and-click взаимодействия. Находит/создаёт MouseInteractor и связывает его с ClickInteractionHUD.
 
+**Обновление:** Теперь использует `GameInput` вместо прямого `InputAction`.
+
 **Как использовать:**
-```csharp
-var clickAction = inputAsset.FindAction("Player/Click"); // или ваше действие
-var initStep = new ClickInteractionInitStep(clickAction);
-initContext.Register(initStep);
-```
+Автоматически добавляется через `GameplayBootstrap` при включении `_pointAndClickMode`.
 
 ---
 
-## Настройка сцены
+### 5. GameplayBootstrap (обновлённый)
 
-### Шаг 1: Удаление игрока
-- Удалите префаб игрока со сцены (или не спавньте его)
-- Оставьте только камеру
+**Расположение:** `/GameCore/Core/Boot/GameplayBootstrap.cs`
 
-### Шаг 2: Настройка камеры
-1. Добавьте компонент `PointAndClickCamera` на камеру
-2. Настройте параметры перемещения и зума
-3. Для ортографической камеры включите `Orthographic` в компоненте Camera
+**Новые поля:**
+- `_pointAndClickMode` — переключатель режима (false = классический с игроком, true = point-and-click)
+- `_pointAndClickCameraPrefab` — опциональный префаб камеры для point-and-click режима
 
-### Шаг 3: Настройка взаимодействия
-1. Добавьте компонент `MouseInteractor` на камеру или отдельный GameObject
-2. Добавьте компонент `ClickInteractionHUD` на Canvas/UI
-3. Настройте UI элемент подсказки (RectTransform + TMP_Text)
+**Логика:**
+При `_pointAndClickMode = true`:
+- Игрок НЕ спавнится
+- Добавляется `ClickInteractionInitStep` для инициализации мышиного взаимодействия
+- Опционально спавнится камера из префаба
 
-### Шаг 4: Инициализация
-В вашем InitStep (например, в SceneInitStep) добавьте:
-```csharp
-var clickAction = inputAsset.FindAction("Player/Click");
-ctx.Register(new ClickInteractionInitStep(clickAction));
-```
+При `_pointAndClickMode = false` (по умолчанию):
+- Спавнится игрок из `_playerPrefab`
+- Добавляется `PlayerInitStep` для классического управления
+- Добавляется `CameraInitStep` для привязки Cinemachine
 
 ---
 
@@ -145,41 +182,51 @@ public class WorldItemPickup : MonoBehaviour, IInteractable
 | Рейкаст из центра экрана | Рейкаст из позиции курсора |
 | Кроссхейр по центру | Курсор мыши |
 | InteractionHUD с кроссхейром | ClickInteractionHUD у курсора |
+| Использует InputAction напрямую | Использует GameInput |
 
 ---
 
 ## Совместимость
 
-- Существующие `IInteractable` компоненты работают без изменений
-- Можно использовать вместе со старой системой (переключаясь между режимами)
-- `WorldItemPickup`, `LightSwitch` и другие интерактивные объекты работают как прежде
-
----
-
-## Пример настройки Input Action
-
-Создайте Input Action Asset с действием:
-- Name: `Click`
-- Type: `Button`
-- Binding: `Mouse Left Button`
-
-Или используйте стандартное действие из Input System package.
+- ✅ Существующие `IInteractable` компоненты работают без изменений
+- ✅ Можно использовать вместе со старой системой (переключаясь между режимами через `_pointAndClickMode`)
+- ✅ `WorldItemPickup`, `LightSwitch`, `SceneTransitionTrigger` и другие интерактивные объекты работают как прежде
+- ✅ Обратная совместимость со старым методом `Bind(InputAction, DIContainer)` сохранена (помечен как `[Obsolete]`)
 
 ---
 
 ## Troubleshooting
 
 **Проблема:** Подсказки не показываются
-- Проверьте, что `ClickInteractionHUD.SetInteractor()` был вызван
+- Проверьте, что `ClickInteractionHUD.SetInteractor()` был вызван (должен автоматически через `ClickInteractionInitStep`)
 - Убедитесь, что `_hintRoot` и `_hintLabel` назначены в инспекторе
 - Проверьте, что объект имеет `IInteractable` и возвращает не-null `Prompt`
+- Убедитесь, что `_pointAndClickMode = true` в GameplayBootstrap
 
 **Проблема:** Клик не взаимодействует с объектом
 - Проверьте, что на объекте есть коллайдер
 - Убедитесь, что слой объекта входит в `Interactable Mask`
-- Проверьте, что `MouseInteractor.Bind()` был вызван с правильным InputAction
+- Проверьте, что в Input Action Asset есть действие `Player/Interact`
+- Проверьте логи консоли на предмет предупреждений от `MouseInteractor`
 
 **Проблема:** Камера не двигается
 - Убедитесь, что `PointAndClickCamera` добавлен на камеру
 - Проверьте, что `AllowKeyboardMove` или `AllowEdgeScroll` включены
 - Для зума убедитесь, что камера в режиме `Orthographic`
+
+**Проблема:** Ошибка "Player.Interact не найден в GameInput"
+- Проверьте ваш Input Action Asset
+- Убедитесь, что в карте `Player` есть действие `Interact`
+- Пересохраните Input Action Asset и перекомпилируйте скрипты
+
+---
+
+## Примечания
+
+1. **Сохранения:** В point-and-click режиме система сохранений продолжает работать, но позиция игрока не сохраняется (так как игрока нет)
+
+2. **Переходы между сценами:** `SceneTransitionTrigger` работает как прежде — при клике на дверь происходит переход на другую сцену
+
+3. **Инвентарь и пауза:** Работают стандартно через `UIScreenManager`
+
+4. **Пререндеренные фоны:** Используйте `PreRenderedBackgroundManager` вместе с этой системой для переключения фонов в зависимости от позиции камеры
