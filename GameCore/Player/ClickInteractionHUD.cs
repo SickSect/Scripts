@@ -1,6 +1,6 @@
+using System;
 using Core.Interaction;
 using R3;
-using System;
 using TMPro;
 using UnityEngine;
 
@@ -103,7 +103,7 @@ namespace Core.UI.HUD
         {
             if (_camera == null || !RectTransformUtility.ScreenPointToLocalPointInRectangle(
                     _hintRoot.parent as RectTransform,
-                    Input.mousePosition,
+                    new Vector3(),
                     _camera,
                     out Vector2 localPoint))
             {
