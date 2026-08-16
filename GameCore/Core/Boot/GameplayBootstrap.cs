@@ -28,7 +28,7 @@ namespace Core.Boot
         [Header("Point-and-Click режим")]
         [Tooltip("Если true, игрок не спавнится, используется камера с управлением мышью")]
         [SerializeField] private bool _pointAndClickMode = false;
-        [SerializeField] private Camera _pointAndClickCameraPrefab; // опционально, можно использовать камеру сцены
+        // Камера теперь настраивается автоматически через ClickInteractionInitStep
 
         // Объекты, которые этот bootstrap создал и должен убрать при уничтожении сцены.
         private readonly List<GameObject> _spawned = new();
@@ -87,16 +87,8 @@ namespace Core.Boot
                 
                 var input = ctx.Root.Resolve<Core.Input.GameInput>();
                 
-                // Инициализация взаимодействия через клик мыши
+                // Инициализация взаимодействия через клик мыши (включая настройку камеры)
                 initializer.Add(new ClickInteractionInitStep(input));
-                
-                // Камера для point-and-click (если назначена или нужно создать)
-                if (_pointAndClickCameraPrefab != null)
-                {
-                    var cameraGo = Instantiate(_pointAndClickCameraPrefab.gameObject);
-                    _spawned.Add(cameraGo);
-                    DontDestroyOnLoad(cameraGo);
-                }
             }
             else
             {

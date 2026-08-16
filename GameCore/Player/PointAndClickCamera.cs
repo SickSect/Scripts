@@ -1,5 +1,6 @@
 using UnityEngine;
 using UnityEngine.InputSystem;
+using Core.Input;
 
 namespace Core.Player
 {
@@ -8,6 +9,7 @@ namespace Core.Player
     /// позволяет перемещаться по уровню клавишами WASD/стрелками или двигая мышью у краёв экрана.
     /// 
     /// Вешается на основную камеру сцены. Игрок не спавнится — камера управляется напрямую.
+    /// Использует новую систему ввода Unity (Input System) с событиями performed/canceled.
     /// </summary>
     public class PointAndClickCamera : MonoBehaviour
     {
@@ -33,6 +35,10 @@ namespace Core.Player
 
         private Camera _camera;
         private Vector3 _velocity;
+        
+        // Новая система ввода
+        private InputAction _moveAction;
+        private Vector2 _moveInput;
 
         private void Awake()
         {
@@ -41,6 +47,61 @@ namespace Core.Player
             {
                 Debug.LogError("[PointAndClickCamera] Камера не найдена на этом GameObject!");
             }
+            
+            // Инициализация действия движения, если оно еще не назначено через BindInput
+            if (_moveAction == null)
+            {
+                // Попытка найти стандартное действие "Move" в дефолтном ассете
+                var playerInput = GetComponent<PlayerInput>();
+                if (playerInput != null)
+                {
+                    _moveAction = playerInput.actions["Move"];
+                    SetupInputListeners();
+                }
+            }
+        }
+
+        /// <summary>
+        /// Привязка действия движения из новой системы ввода Unity.
+        /// Вызывать после инициализации Input Actions.
+        /// </summary>
+        public void BindInput(InputAction moveAction)
+        {
+            // Отписываемся от старого действия, если было
+            if (_moveAction != null)
+            {
+                _moveAction.performed -= OnMovePerformed;
+                _moveAction.canceled -= OnMoveCanceled;
+            }
+
+            _moveAction = moveAction;
+            SetupInputListeners();
+            
+            // Если действие уже активно, считываем текущее значение
+            if (_moveAction != null && _moveAction.enabled)
+            {
+                _moveInput = _moveAction.ReadValue<Vector2>();
+            }
+        }
+
+        private void SetupInputListeners()
+        {
+            if (_moveAction == null) return;
+            
+            _moveAction.performed += OnMovePerformed;
+            _moveAction.canceled += OnMoveCanceled;
+        }
+
+        // Обработка нажатия и изменения значения
+        private void OnMovePerformed(InputAction.CallbackContext ctx) 
+        {
+            _moveInput = ctx.ReadValue<Vector2>();
+        }
+
+        // Обработка отпускания клавиш
+        private void OnMoveCanceled(InputAction.CallbackContext ctx) 
+        {
+            _moveInput = Vector2.zero;
         }
 
         private void Update()
@@ -55,18 +116,10 @@ namespace Core.Player
         {
             if (!_allowKeyboardMove) return;
 
-            Vector3 move = Vector3.zero;
-
-            if (Keyboard.current != null)
+            if (_moveInput.sqrMagnitude > 0.01f)
             {
-                if (Keyboard.current.wKey.isPressed || Keyboard.current.upArrow.isPressed) move += Vector3.up;
-                if (Keyboard.current.sKey.isPressed || Keyboard.current.downArrow.isPressed) move += Vector3.down;
-                if (Keyboard.current.aKey.isPressed || Keyboard.current.leftArrow.isPressed) move += Vector3.left;
-                if (Keyboard.current.dKey.isPressed || Keyboard.current.rightArrow.isPressed) move += Vector3.right;
-            }
-
-            if (move.sqrMagnitude > 0)
-            {
+                // _moveInput.x = влево/вправо, _moveInput.y = вверх/вниз
+                Vector3 move = new Vector3(_moveInput.x, _moveInput.y, 0);
                 transform.position += move.normalized * _moveSpeed * Time.deltaTime;
             }
         }
@@ -112,6 +165,34 @@ namespace Core.Player
             pos.x = Mathf.Clamp(pos.x, _minBounds.x, _maxBounds.x);
             pos.y = Mathf.Clamp(pos.y, _minBounds.y, _maxBounds.y);
             transform.position = pos;
+        }
+
+        private void OnEnable()
+        {
+            // Восстанавливаем подписку при активации
+            if (_moveAction != null)
+            {
+                SetupInputListeners();
+            }
+        }
+
+        private void OnDisable()
+        {
+            // Важно отключать подписку при дезактивации объекта
+            if (_moveAction != null)
+            {
+                _moveAction.performed -= OnMovePerformed;
+                _moveAction.canceled -= OnMoveCanceled;
+            }
+        }
+
+        private void OnDestroy()
+        {
+            if (_moveAction != null)
+            {
+                _moveAction.performed -= OnMovePerformed;
+                _moveAction.canceled -= OnMoveCanceled;
+            }
         }
     }
 }

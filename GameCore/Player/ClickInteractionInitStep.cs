@@ -1,6 +1,7 @@
 using Core.Init;
 using Core.Interaction;
 using UnityEngine;
+using UnityEngine.InputSystem;
 
 namespace Core.Player
 {
@@ -9,6 +10,7 @@ namespace Core.Player
     /// 
     /// Создаёт/находит MouseInteractor на сцене, биндит ввод (клик мыши) и связывает
     /// с ClickInteractionHUD для отображения подсказок.
+    /// Также настраивает PointAndClickCamera для управления движением камеры.
     /// 
     /// Использует новую систему ввода GameInput вместо прямых InputAction.
     /// </summary>
@@ -51,6 +53,27 @@ namespace Core.Player
             else
             {
                 Debug.LogWarning("[ClickInteractionInitStep] ClickInteractionHUD не найден в сцене");
+            }
+
+            // Настраиваем камеру для point-and-click режима
+            var camera = Camera.main;
+            if (camera != null)
+            {
+                var pointAndClickCamera = camera.GetComponent<PointAndClickCamera>();
+                if (pointAndClickCamera == null)
+                {
+                    pointAndClickCamera = camera.gameObject.AddComponent<PointAndClickCamera>();
+                    Debug.Log("[ClickInteractionInitStep] Добавлен компонент PointAndClickCamera на основную камеру");
+                }
+
+                // Биндим действие движения к камере
+                var moveAction = _gameInput.Actions.Player.Move;
+                pointAndClickCamera.BindInput(moveAction);
+                Debug.Log("[ClickInteractionInitStep] PointAndClickCamera привязана к Move через GameInput");
+            }
+            else
+            {
+                Debug.LogWarning("[ClickInteractionInitStep] Camera.main не найдена");
             }
         }
     }
