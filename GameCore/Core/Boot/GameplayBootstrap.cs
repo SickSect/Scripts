@@ -81,7 +81,7 @@ namespace Core.Boot
             var input = ctx.Root.Resolve<Core.Input.GameInput>();
                 
             // Инициализация взаимодействия через клик мыши (включая настройку камеры)
-            initializer.Add(new ClickInteractionInitStep(input));
+            initializer.Add(new ClickInteractionInitStep());
 
             // Инвентарь: загрузка из снапшота + регистрация в сохранении.
             initializer.Add(new Core.Inventory.InventoryInitStep());

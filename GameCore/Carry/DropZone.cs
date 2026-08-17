@@ -1,222 +1,158 @@
 using System.Collections.Generic;
-using Core.Flags;
 using UnityEngine;
 using UnityEngine.Events;
+using Core.Interaction;
 
-namespace Core.Carry
+namespace Core.Interaction.Interactables
 {
     /// <summary>
-    /// Рабочая зона. Ловит отпущенный предмет своим триггером и ставит его ровно
-    /// в центр — целиться не нужно, достаточно задеть.
-    ///
-    /// Поймав предмет, выкладывает его содержимое: посылка раскрывается уликой,
-    /// документом, ключевым текстом. Забрал коробку обратно — содержимое исчезает.
-    ///
-    /// Нужен коллайдер с включённым Is Trigger. Размер триггера — это и есть
-    /// «зона притяжения», делай его щедрым.
+    /// Зона для размещения переносимых объектов.
+    /// Проверяет наличие объектов, реализующих интерфейс ICarryable, внутри своего коллайдера-триггера.
     /// </summary>
     [RequireComponent(typeof(Collider))]
     public class DropZone : MonoBehaviour
     {
-        [Header("Что принимает")]
-        [Tooltip("Ключ. Должен совпасть с zoneKey у Carryable.")]
-        [SerializeField] private string _acceptKey = "workdesk";
+        [Header("Настройки зоны")]
+        [Tooltip("Список тегов или имен объектов, которые зона принимает (опционально). Если пусто - принимает любой ICarryable.")]
+        [SerializeField] private string[] _acceptedTags;
 
-        [Header("Куда ставить")]
-        [Tooltip("Точка, куда встанет предмет. Пусто — этот объект.")]
-        [SerializeField] private Transform _snapAnchor;
+        [Tooltip("Событие вызывается, когда в зоне появляется правильный предмет.")]
+        [SerializeField] private UnityEvent<GameObject> _onItemPlaced;
 
-        [Tooltip("Точки, куда лягут предметы из посылки: первый в первую, второй во вторую. " +
-                 "Расставь их на столе как хочешь — наклон и поворот тоже берутся отсюда. " +
-                 "Пусто — всё ляжет в точку предмета.")]
-        [SerializeField] private Transform[] _contentAnchors;
+        [Tooltip("Событие вызывается, когда из зоны убирают предмет.")]
+        [SerializeField] private UnityEvent<GameObject> _onItemRemoved;
 
-        [Tooltip("Разброс для предметов, которым не хватило якоря, в метрах.")]
-        [SerializeField] private float _overflowSpread = 0.12f;
+        [Tooltip("Нужно ли уничтожать предмет после успешной доставки?")]
+        [SerializeField] private bool _destroyOnSuccess = false;
 
-        [Header("Подсветка")]
-        [Tooltip("Включается, пока игрок держит подходящий предмет.")]
-        [SerializeField] private GameObject _highlight;
-
-        [Header("Метка")]
-        [Tooltip("Ставится при первом приёме. Через неё реагируют фазы и условия.")]
-        [SerializeField] private TriggerDefinition _acceptedTrigger;
-
-        [Header("События")]
-        public UnityEvent onAccepted;
-        public UnityEvent onVacated;
-
-        [Header("Debug")]
-        [SerializeField] private bool _debugLog = false;
-
-        private readonly List<GameObject> _spawned = new();
-        private static readonly Collider[] _hits = new Collider[16];
-
-        private PlayerCarry _carry;
-        private FlagService _flags;
-
-        public string AcceptKey => _acceptKey;
-        public bool IsOccupied { get; private set; }
-
-        /// <summary>Куда встаёт предмет.</summary>
-        public Transform SnapAnchor => _snapAnchor != null ? _snapAnchor : transform;
+        private Collider _zoneCollider;
+        private readonly List<ICarryable> _containedItems = new List<ICarryable>();
 
         private void Awake()
         {
-            if (_highlight != null) _highlight.SetActive(false);
+            _zoneCollider = GetComponent<Collider>();
+
+            if (!_zoneCollider.isTrigger)
+            {
+                Debug.LogWarning($"[DropZone] Коллайдер на объекте {name} не является триггером (Is Trigger = false). Зона не сможет детектировать предметы автоматически через OnTrigger. Установите Is Trigger = true.");
+                // Мы можем работать и без триггера через ручной вызов CheckCompletion, но лучше исправить в редакторе.
+            }
         }
 
-        /// <summary>Прокидывается один раз, чтобы зона могла ставить метку.</summary>
-        public void BindFlags(FlagService flags) => _flags = flags;
-
-        private void Update()
-        {
-            if (_highlight == null) return;
-
-            if (_carry == null) _carry = FindAnyObjectByType<PlayerCarry>();
-
-            bool ready = !IsOccupied
-                         && _carry != null
-                         && _carry.IsCarrying
-                         && _carry.Current.ZoneKey == _acceptKey;
-
-            if (_highlight.activeSelf != ready) _highlight.SetActive(ready);
-        }
-
-        // Ловим предмет, который в зону влетел (бросок с расстояния).
+        /// <summary>
+        /// Вызывается, когда объект попадает в триггер зоны (например, упал при броске).
+        /// </summary>
         private void OnTriggerEnter(Collider other)
         {
-            var item = other.GetComponentInParent<Carryable>();
-            if (item != null) TryAccept(item);
+            TryAddItem(other);
         }
 
-        public bool CanAccept(Carryable item)
-            => !IsOccupied
-               && item != null
-               && !item.IsHeld
-               && item.CurrentZone == null
-               && !string.IsNullOrEmpty(_acceptKey)
-               && item.ZoneKey == _acceptKey;
-
-        /// <summary>Принять предмет, если он подходит. Возвращает, случилось ли.</summary>
-        public bool TryAccept(Carryable item)
+        /// <summary>
+        /// Вызывается, когда объект покидает триггер зоны (например, его подобрали обратно).
+        /// </summary>
+        private void OnTriggerExit(Collider other)
         {
-            if (!CanAccept(item)) return false;
+            TryRemoveItem(other);
+        }
 
-            item.OnSnapped(this, SnapAnchor);
+        private void TryAddItem(Collider other)
+        {
+            // Ищем интерфейс ICarryable в иерархии объекта (вдруг он на родителе)
+            ICarryable carryable = other.GetComponentInParent<ICarryable>();
 
-            var prefabs = item.ContentsPrefabs;
-
-            if (prefabs != null)
+            if (carryable != null)
             {
-                for (int i = 0; i < prefabs.Length; i++)
+                // Проверка по тегам/именам, если настроено
+                if (!IsAccepted(carryable.Transform.gameObject))
                 {
-                    if (prefabs[i] == null) continue;
-                    _spawned.Add(SpawnContent(prefabs[i], i));
+                    return;
+                }
+
+                if (!_containedItems.Contains(carryable))
+                {
+                    _containedItems.Add(carryable);
+                    Debug.Log($"[DropZone] Предмет добавлен: {carryable.Transform.name}. Всего предметов: {_containedItems.Count}");
+
+                    _onItemPlaced?.Invoke(carryable.Transform.gameObject);
+
+                    // Опционально: можно сразу проверять условие победы, если нужен ровно 1 предмет
+                    // CheckCompletion(); 
                 }
             }
+        }
 
-            IsOccupied = true;
-            if (_highlight != null) _highlight.SetActive(false);
+        private void TryRemoveItem(Collider other)
+        {
+            ICarryable carryable = other.GetComponentInParent<ICarryable>();
 
-            if (_acceptedTrigger != null && _flags != null) _flags.Set(_acceptedTrigger);
+            if (carryable != null && _containedItems.Contains(carryable))
+            {
+                _containedItems.Remove(carryable);
+                Debug.Log($"[DropZone] Предмет удален: {carryable.Transform.name}. Осталось: {_containedItems.Count}");
 
-            onAccepted?.Invoke();
-
-            if (_debugLog)
-                Debug.Log($"[DropZone] '{name}' принял '{item.name}', выложено {_spawned.Count}");
-
-            return true;
+                _onItemRemoved?.Invoke(carryable.Transform.gameObject);
+            }
         }
 
         /// <summary>
-        /// Разложить один предмет содержимого. Якоря разбираются по порядку;
-        /// когда они кончаются, остаток раскладывается по кругу вокруг последнего,
-        /// чтобы предметы не слипались в одной точке.
+        /// Ручная проверка содержимого зоны.
+        /// Полезно, если физика триггеров сработала некорректно или предмет телепортировали.
         /// </summary>
-        private GameObject SpawnContent(GameObject prefab, int index)
+        public void CheckCompletion()
         {
-            bool hasAnchors = _contentAnchors != null && _contentAnchors.Length > 0;
+            // Очищаем список от "мертвых" ссылок или предметов, которые физически уже не в зоне
+            _containedItems.RemoveAll(item => item == null || !IsInsideZone(item.Transform));
 
-            if (!hasAnchors)
-                return Instantiate(prefab, SnapAnchor.position, SnapAnchor.rotation, SnapAnchor);
-
-            if (index < _contentAnchors.Length && _contentAnchors[index] != null)
+            // Логика проверки условия победы/задачи
+            if (_containedItems.Count > 0)
             {
-                var a = _contentAnchors[index];
-                return Instantiate(prefab, a.position, a.rotation, a);
+                Debug.Log($"[DropZone] Проверка успешна. В зоне {_containedItems.Count} предметов.");
+
+                if (_destroyOnSuccess)
+                {
+                    foreach (var item in _containedItems)
+                    {
+                        Destroy(item.Transform.gameObject);
+                    }
+                    _containedItems.Clear();
+                }
             }
-
-            // Якорей не хватило — раскладываем по кругу вокруг последнего.
-            Transform last = _contentAnchors[^1] != null ? _contentAnchors[^1] : SnapAnchor;
-
-            int overflow = index - _contentAnchors.Length + 1;
-            float angle = overflow * 137.5f * Mathf.Deg2Rad;   // золотой угол: точки не совпадают
-            Vector3 offset = new(Mathf.Cos(angle), 0f, Mathf.Sin(angle));
-
-            Debug.LogWarning($"[DropZone] '{name}': якорей меньше, чем предметов " +
-                             $"({_contentAnchors.Length}). '{prefab.name}' положен рядом.");
-
-            return Instantiate(prefab, last.position + offset * _overflowSpread, last.rotation, last);
+            else
+            {
+                Debug.Log("[DropZone] Зона пуста.");
+            }
         }
 
-        /// <summary>Предмет забрали обратно: содержимое уезжает вместе с ним.</summary>
-        public void Vacate()
+        private bool IsAccepted(GameObject obj)
         {
-            for (int i = 0; i < _spawned.Count; i++)
-                if (_spawned[i] != null) Destroy(_spawned[i]);
+            if (_acceptedTags == null || _acceptedTags.Length == 0)
+                return true;
 
-            _spawned.Clear();
-            IsOccupied = false;
-
-            onVacated?.Invoke();
-
-            if (_debugLog) Debug.Log($"[DropZone] '{name}' освобождена");
-        }
-
-        /// <summary>
-        /// Поиск зоны вокруг только что отпущенного предмета.
-        /// Нужен потому, что OnTriggerEnter не сработает, если предмет
-        /// уже находился внутри триггера в момент отпускания.
-        /// </summary>
-        public static bool TryCaptureAt(Carryable item)
-        {
-            if (item == null) return false;
-
-            int count = Physics.OverlapSphereNonAlloc(
-                item.transform.position,
-                item.ApproxRadius + 0.15f,
-                _hits,
-                ~0,
-                QueryTriggerInteraction.Collide);
-
-            for (int i = 0; i < count; i++)
+            foreach (string tag in _acceptedTags)
             {
-                var zone = _hits[i].GetComponentInParent<DropZone>();
-                if (zone != null && zone.TryAccept(item)) return true;
+                if (obj.CompareTag(tag) || obj.name.Contains(tag))
+                    return true;
             }
-
             return false;
         }
 
-#if UNITY_EDITOR
-        private void OnDrawGizmos()
+        private bool IsInsideZone(Transform itemTransform)
         {
-            Gizmos.color = IsOccupied ? Color.gray : new Color(0.4f, 1f, 0.5f, 0.9f);
-            Gizmos.DrawWireCube(SnapAnchor.position, Vector3.one * 0.2f);
+            if (_zoneCollider == null) return false;
 
-            if (_contentAnchors == null) return;
+            // Простая проверка через Bounds коллайдера
+            Bounds bounds = _zoneCollider.bounds;
+            return bounds.Contains(itemTransform.position);
+        }
 
-            Gizmos.color = new Color(1f, 0.85f, 0.3f, 0.9f);
-
-            for (int i = 0; i < _contentAnchors.Length; i++)
+        // Отладка в редакторе
+        private void OnDrawGizmosSelected()
+        {
+            if (_zoneCollider != null)
             {
-                if (_contentAnchors[i] == null) continue;
-
-                Gizmos.DrawWireSphere(_contentAnchors[i].position, 0.05f);
-                Gizmos.DrawRay(_contentAnchors[i].position, _contentAnchors[i].up * 0.1f);
+                Gizmos.color = Color.green;
+                Gizmos.DrawWireCube(_zoneCollider.bounds.center, _zoneCollider.bounds.size);
             }
         }
-#endif
     }
 }

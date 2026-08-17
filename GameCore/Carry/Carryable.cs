@@ -1,145 +1,113 @@
-using Core.Interaction;
 using UnityEngine;
+using Core.Interaction;
 
-namespace Core.Carry
+namespace Core.Interaction.Interactables
 {
     /// <summary>
-    /// Предмет, который игрок несёт в руках, а не кладёт в инвентарь.
-    ///
-    /// Отпускается где угодно. Куда именно он «примагнитится», решает не предмет,
-    /// а зона: DropZone принимает только совпадающий zoneKey. Пустой ключ —
-    /// предмет не липнет никуда и просто падает.
-    ///
-    /// Мелочь, которая должна попадать в инвентарь, остаётся на WorldItemPickup —
-    /// это независимые механики, не заменяющие друг друга.
+    /// Компонент, делающий объект переносимым.
+    /// Работает в паре с MouseInteractor.
     /// </summary>
     [RequireComponent(typeof(Rigidbody))]
-    public class Carryable : MonoBehaviour, IInteractable
+    [RequireComponent(typeof(Collider))]
+    public class Carryable : MonoBehaviour, ICarryable
     {
-        [Header("Подсказка")]
-        [SerializeField] private string _prompt = "Взять";
+        [Header("Визуал")]
+        [Tooltip("Подсвечивать предмет при поднятии?")]
+        [SerializeField] private bool _useHighlight = true;
 
-        [Header("Зона назначения")]
-        [Tooltip("Ключ зоны. Должен совпасть с acceptKey у DropZone. Пусто — не липнет никуда.")]
-        [SerializeField] private string _zoneKey = "";
-
-        [Header("Поза в руках")]
-        [SerializeField] private Vector3 _holdOffset = Vector3.zero;
-        [SerializeField] private Vector3 _holdEuler = Vector3.zero;
-
-        [Header("Содержимое")]
-        [Tooltip("Что выкладывается в зоне. Для посылки — улика, документ, ключевой текст. " +
-                 "Забрал коробку обратно — содержимое исчезает вместе с ней.")]
-        [SerializeField] private GameObject[] _contentsPrefabs;
+        [Tooltip("Цвет подсветки при поднятии.")]
+        [SerializeField] private Color _holdColor = Color.yellow;
 
         private Rigidbody _rb;
-        private Collider[] _colliders;
-        private bool _wasKinematic;
+        private Renderer[] _renderers;
+        private Color[] _originalColors;
+        private bool _isHeld = false;
 
-        public string Prompt => _prompt;
-        public string ZoneKey => _zoneKey;
-        public Vector3 HoldOffset => _holdOffset;
-        public Quaternion HoldRotation => Quaternion.Euler(_holdEuler);
-        public GameObject[] ContentsPrefabs => _contentsPrefabs;
-
-        public bool IsHeld { get; private set; }
-
-        /// <summary>Зона, в которой предмет сейчас лежит. Null — на руках или на полу.</summary>
-        public DropZone CurrentZone { get; private set; }
+        // Реализация интерфейса
+        public Transform Transform => transform;
+        public Rigidbody Rigidbody => _rb;
 
         private void Awake()
         {
             _rb = GetComponent<Rigidbody>();
-            _colliders = GetComponentsInChildren<Collider>();
-            _wasKinematic = _rb.isKinematic;
-        }
+            _renderers = GetComponentsInChildren<Renderer>();
 
-        public void Interact(InteractionContext context)
-        {
-            if (IsHeld || context.Player == null) return;
-
-            var carry = context.Player.GetComponentInChildren<PlayerCarry>(true);
-
-            if (carry == null)
+            // Сохраняем оригинальные цвета материалов
+            if (_useHighlight && _renderers.Length > 0)
             {
-                Debug.LogError("[Carryable] на игроке нет PlayerCarry.");
-                return;
+                _originalColors = new Color[_renderers.Length];
+                for (int i = 0; i < _renderers.Length; i++)
+                {
+                    _originalColors[i] = _renderers[i].material.color;
+                }
             }
 
-            carry.Take(this);
+            // Настройка физики для стабильности
+            _rb.interpolation = RigidbodyInterpolation.Interpolate;
+            _rb.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+
+            // Важно: убедимся, что центр масс адекватный, чтобы коробка не кувыркалась странно
+            _rb.centerOfMass = Vector3.zero;
         }
 
-        /// <summary>Взято в руки. Если лежал в зоне — зона убирает выложенное содержимое.</summary>
-        public void OnPickedUp(Transform holder)
+        /// <summary>
+        /// Вызывается при поднятии (ЛКМ).
+        /// Отключает симуляцию физики, чтобы MouseInteractor мог двигать объект через Transform.
+        /// </summary>
+        public void OnPickUp()
         {
-            if (CurrentZone != null)
-            {
-                CurrentZone.Vacate();
-                CurrentZone = null;
-            }
+            if (_isHeld) return;
+            _isHeld = true;
 
-            IsHeld = true;
-
-            // Скорости гасим ДО перевода в kinematic: на кинематическом теле
-            // Unity ругается на любую попытку их задать.
-            StopMotion();
+            // Делаем кинематическим (физика игнорируется, двигаем руками)
             _rb.isKinematic = true;
-
-            SetCollidersEnabled(false);
-            transform.SetParent(holder, true);
-        }
-
-        /// <summary>Отпущено из рук: физика возвращается, предмет летит и падает.</summary>
-        public void OnReleased()
-        {
-            IsHeld = false;
-            transform.SetParent(null, true);
-
-            SetCollidersEnabled(true);
-            _rb.isKinematic = _wasKinematic;
-        }
-
-        /// <summary>Зона поймала предмет: ставим ровно в её якорь и замораживаем.</summary>
-        public void OnSnapped(DropZone zone, Transform anchor)
-        {
-            IsHeld = false;
-            CurrentZone = zone;
-
-            StopMotion();
-            _rb.isKinematic = true;
-
-            transform.SetParent(anchor, false);
-            transform.SetLocalPositionAndRotation(Vector3.zero, Quaternion.identity);
-
-            SetCollidersEnabled(true);
-        }
-
-        /// <summary>Габарит для поиска зоны при отпускании.</summary>
-        public float ApproxRadius
-        {
-            get
-            {
-                for (int i = 0; i < _colliders.Length; i++)
-                    if (_colliders[i] != null)
-                        return _colliders[i].bounds.extents.magnitude;
-
-                return 0.25f;
-            }
-        }
-
-        /// <summary>Обнулить скорости. Работает только на некинематическом теле.</summary>
-        private void StopMotion()
-        {
-            if (_rb.isKinematic) return;
-
-            _rb.linearVelocity = Vector3.zero;
             _rb.angularVelocity = Vector3.zero;
+            _rb.linearVelocity = Vector3.zero;
+
+            if (_useHighlight) ApplyColor(_holdColor);
+
+            Debug.Log($"[Carryable] Поднят: {gameObject.name}");
         }
 
-        private void SetCollidersEnabled(bool value)
+        /// <summary>
+        /// Вызывается при броске (повторный ЛКМ).
+        /// Включает симуляцию физики обратно. Объект упадет под действием гравитации.
+        /// </summary>
+        public void OnDrop()
         {
-            for (int i = 0; i < _colliders.Length; i++)
-                if (_colliders[i] != null) _colliders[i].enabled = value;
+            if (!_isHeld) return;
+            _isHeld = false;
+
+            // Возвращаем управление физике
+            _rb.isKinematic = false;
+            // Гравитацию включает сам MouseInteractor (useGravity = true), 
+            // но на всякий случай продублируем проверку здесь, если логика изменится.
+
+            if (_useHighlight) RestoreColors();
+
+            Debug.Log($"[Carryable] Брошен: {gameObject.name}");
         }
+
+        #region Helpers
+        private void ApplyColor(Color color)
+        {
+            foreach (var r in _renderers)
+            {
+                if (r != null) r.material.color = color;
+            }
+        }
+
+        private void RestoreColors()
+        {
+            if (_originalColors == null) return;
+            for (int i = 0; i < _renderers.Length; i++)
+            {
+                if (_renderers[i] != null && i < _originalColors.Length)
+                {
+                    _renderers[i].material.color = _originalColors[i];
+                }
+            }
+        }
+        #endregion
     }
 }

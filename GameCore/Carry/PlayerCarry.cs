@@ -1,4 +1,4 @@
-using Core.Player;
+/*using Core.Player;
 using UnityEngine;
 using UnityEngine.InputSystem;
 
@@ -135,3 +135,4 @@ namespace Core.Carry
         }
     }
 }
+*/

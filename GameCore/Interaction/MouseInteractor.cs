@@ -4,29 +4,24 @@ using UnityEngine.InputSystem;
 using R3;
 using Core.DI;
 using Core.Interaction.Interactables;
-using Core.Carry;
 
 namespace Core.Interaction
 {
-    /// <summary>
-    /// Обрабатывает клики мыши и перетаскивание объектов.
-    /// </summary>
     public class MouseInteractor : MonoBehaviour
     {
-        [Header("Настройки перетаскивания")]
-        [Tooltip("Высота, на которой держится предмет относительно камеры")]
-        [SerializeField] private float _holdHeightOffset = 2.0f;
-        [Tooltip("С какой скоростью предмет следует за мышью (плавность)")]
-        [SerializeField] private float _holdSmoothSpeed = 15f;
+        [Header("Настройки переноса")]
+        [Tooltip("Высота над землей (Y), на которой висит предмет при переноске.")]
+        [SerializeField] private float _holdHeight = 1.5f;
+
+        [Tooltip("Смещение по курсору (например, чуть выше центра).")]
+        [SerializeField] private Vector2 _cursorOffset = Vector2.zero;
 
         private Camera _camera;
         private IInteractable _currentHovered;
 
-        // Логика удержания предмета
-        private ICarryable _heldObject; // Используем наш интерфейс ICarryable
-        private Vector3 _holdVelocity;
+        // Логика удержания
+        private ICarryable _heldObject;
 
-        // События для UI
         public ReactiveProperty<string> HoveredPrompt { get; } = new(string.Empty);
         public event Action<IInteractable> OnHoverEnter;
         public event Action OnHoverExit;
@@ -36,37 +31,60 @@ namespace Core.Interaction
 
         private void Awake()
         {
-            // Пытаемся найти камеру сразу. Если не нашли - попробуем в Update перед первым использованием.
             _camera = Camera.main;
         }
 
         public void Bind(InputAction interactAction, DIContainer container)
         {
-            if (_interactAction != null)
-            {
-                _interactAction.performed -= OnInteractPerformed;
-            }
+            if (_interactAction != null) _interactAction.performed -= OnInteractPerformed;
 
             _interactAction = interactAction;
-
             if (_interactAction != null)
             {
                 _interactAction.performed += OnInteractPerformed;
-                Debug.Log($"[MouseInteractor] Bind: {interactAction.name}, Enabled={interactAction.enabled}");
+                _interactAction.Enable();
+                Debug.Log($"[MouseInteractor] Bound to '{interactAction.name}'.");
             }
         }
 
         private void Update()
         {
-            // Если камеры нет, пытаемся найти её снова (вдруг она появилась)
             if (_camera == null)
             {
-                _camera = Camera.main;
-                if (_camera == null) return; // Всё ещё нет - выходим
+                if (_currentHovered != null) ClearHover();
+                return;
             }
 
             UpdateHover();
-            UpdateHeldObject();
+
+            // Если держим предмет, обновляем его позицию ЖЕСТКО за мышью
+            if (_heldObject != null)
+            {
+                UpdateHeldObjectPosition();
+            }
+        }
+
+        private void UpdateHeldObjectPosition()
+        {
+            if (_heldObject == null || _heldObject.Transform == null) return;
+
+            Vector2 mousePos = Mouse.current.position.ReadValue() + _cursorOffset;
+            Ray ray = _camera.ScreenPointToRay(mousePos);
+
+            // ВАЖНО: Мы хотим, чтобы предмет был на высоте _holdHeight.
+            // Находим точку на луче, где Y == _holdHeight.
+            // Формула: dist = (targetY - rayOriginY) / rayDirectionY
+            float distanceToPlane = (_holdHeight - ray.origin.y) / ray.direction.y;
+
+            if (distanceToPlane > 0)
+            {
+                Vector3 targetPos = ray.GetPoint(distanceToPlane);
+
+                // МГНОВЕННОЕ перемещение без SmoothDamp для идеального следования
+                _heldObject.Transform.position = targetPos;
+
+                // Можно добавить легкий поворот к курсору, если нужно, но пока оставим как есть
+            }
         }
 
         private void UpdateHover()
@@ -74,42 +92,26 @@ namespace Core.Interaction
             Vector2 mousePos = Mouse.current.position.ReadValue();
             Ray ray = _camera.ScreenPointToRay(mousePos);
 
-            if (Physics.Raycast(ray, out RaycastHit hit, 100f))
+            // Ищем пересечения только с объектами, которые НЕ являются тем, что мы сейчас держим
+            int layerMask = ~_heldObject?.Transform.gameObject.layer ?? -1;
+
+            if (Physics.Raycast(ray, out RaycastHit hit, 100f, layerMask))
             {
                 IInteractable interactable = hit.collider.GetComponentInParent<IInteractable>();
 
                 if (interactable != null)
                 {
-                    if (_currentHovered != interactable)
-                    {
-                        SetHover(interactable);
-                    }
+                    if (_currentHovered != interactable) SetHover(interactable);
                 }
-                else
+                else if (_currentHovered != null)
                 {
-                    if (_currentHovered != null) ClearHover();
+                    ClearHover();
                 }
             }
-            else
+            else if (_currentHovered != null)
             {
-                if (_currentHovered != null) ClearHover();
+                ClearHover();
             }
-        }
-
-        private void UpdateHeldObject()
-        {
-            if (_heldObject == null) return;
-
-            Vector2 mousePos = Mouse.current.position.ReadValue();
-            Ray ray = _camera.ScreenPointToRay(mousePos);
-
-            // Точка, куда должен стремиться объект (на высоте holdHeightOffset от камеры вдоль луча)
-            Vector3 targetPos = ray.GetPoint(_holdHeightOffset);
-
-            // Плавное следование
-            Vector3 newPos = Vector3.SmoothDamp(_heldObject.Transform.position, targetPos, ref _holdVelocity, 1f / _holdSmoothSpeed);
-
-            _heldObject.Transform.position = newPos;
         }
 
         private void SetHover(IInteractable interactable)
@@ -130,69 +132,49 @@ namespace Core.Interaction
 
         private void OnInteractPerformed(UnityEngine.InputSystem.InputAction.CallbackContext ctx)
         {
-            // ВАЖНО: Проверка камеры перед использованием
-            if (_camera == null)
-            {
-                _camera = Camera.main;
-                if (_camera == null)
-                {
-                    Debug.LogWarning("[MouseInteractor] Клик без камеры! Действие пропущено.");
-                    return;
-                }
-            }
-
-            Vector2 mousePos = Mouse.current.position.ReadValue();
-            Debug.Log($"[CLICK] ScreenPos: {mousePos}");
-
-            // 1. ЛОГИКА "БРОСИТЬ" (если уже держим объект)
+            // Логика "Взял-Бросил"
             if (_heldObject != null)
             {
                 DropObject();
                 return;
             }
 
-            // 2. ЛОГИКА "ВЗЯТЬ" (проверяем, не навели ли на переносимый объект)
+            Vector2 mousePos = Mouse.current.position.ReadValue();
             Ray ray = _camera.ScreenPointToRay(mousePos);
+
             if (Physics.Raycast(ray, out RaycastHit hit, 100f))
             {
-                // Ищем интерфейс ICarryable (наш новый стандарт)
                 ICarryable carryable = hit.collider.GetComponentInParent<ICarryable>();
-
                 if (carryable != null)
                 {
-                    Debug.Log($"[PICKUP] Попытка взять: {carryable.Transform.name}");
                     PickUpObject(carryable);
                     return;
                 }
-
-                // 3. ЛОГИКА ОБЫЧНОГО ВЗАИМОДЕЙСТВИЯ (если не взяли предмет)
-                IInteractable interactable = hit.collider.GetComponentInParent<IInteractable>();
-                if (interactable != null)
-                {
-                    Debug.Log($"[INTERACT] Клик по: {interactable.GetType().Name}");
-                    interactable.Interact();
-                    OnClick?.Invoke(interactable);
-                    return;
-                }
             }
 
-            Debug.Log("[CLICK] Пустой клик (ничего не задето или объект не интерактивный)");
+            // Обычное взаимодействие, если не взяли предмет
+            if (_currentHovered != null)
+            {
+                _currentHovered.Interact(null);
+                OnClick?.Invoke(_currentHovered);
+            }
         }
 
-        private void PickUpObject(Carryable carryable)
+        private void PickUpObject(ICarryable carryable)
         {
             _heldObject = carryable;
 
+            // Отключаем физику, чтобы управлять трансформом напрямую
             if (carryable.Rigidbody != null)
             {
                 carryable.Rigidbody.isKinematic = true;
-                carryable.Rigidbody.velocity = Vector3.zero;
+                carryable.Rigidbody.linearVelocity = Vector3.zero;
                 carryable.Rigidbody.angularVelocity = Vector3.zero;
+                carryable.Rigidbody.useGravity = false; // Важно: отключаем гравитацию, чтобы не падал при движении
             }
 
             carryable.OnPickUp();
-            Debug.Log($"[SYSTEM] Предмет взят: {carryable.Transform.name}");
-
+            Debug.Log($"[System] Предмет взят: {carryable.Transform.name}");
             ClearHover();
         }
 
@@ -202,25 +184,25 @@ namespace Core.Interaction
 
             var obj = _heldObject;
 
+            // Включаем физику обратно
             if (obj.Rigidbody != null)
             {
                 obj.Rigidbody.isKinematic = false;
+                obj.Rigidbody.useGravity = true;
+                // Небольшой толчок вниз, чтобы гарантировать выход из коллизий, если застрял
+                // obj.Rigidbody.AddForce(Vector3.down * 0.1f, ForceMode.VelocityChange); 
             }
 
             obj.OnDrop();
-            Debug.Log($"[SYSTEM] Предмет брошен: {obj.Transform.name}");
+            Debug.Log($"[System] Предмет брошен: {obj.Transform.name}");
 
             _heldObject = null;
         }
 
         private void OnDestroy()
         {
-            if (_interactAction != null)
-            {
-                _interactAction.performed -= OnInteractPerformed;
-            }
+            if (_interactAction != null) _interactAction.performed -= OnInteractPerformed;
             HoveredPrompt.Dispose();
-
             if (_heldObject != null) DropObject();
         }
     }
