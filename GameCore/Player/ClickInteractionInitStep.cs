@@ -1,5 +1,6 @@
 using Core.Init;
 using Core.Interaction;
+using Core.UI.HUD;
 using UnityEngine;
 using UnityEngine.InputSystem;
 
@@ -37,6 +38,7 @@ namespace Core.Player
                 interactor = go.AddComponent<MouseInteractor>();
             }
 
+            _gameInput.SwitchToPlayer();
             // Биндим клик через новую систему ввода
             // Используем экшен Interact из карты Player
             var clickAction = _gameInput.Actions.Player.Interact;

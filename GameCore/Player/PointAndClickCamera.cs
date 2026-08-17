@@ -1,73 +1,49 @@
 using UnityEngine;
 using UnityEngine.InputSystem;
-using Core.Input;
 
 namespace Core.Player
 {
     /// <summary>
-    /// Простая камера для режима point-and-click: следует за позицией мыши на уровне,
-    /// позволяет перемещаться по уровню клавишами WASD/стрелками или двигая мышью у краёв экрана.
-    /// 
-    /// Вешается на основную камеру сцены. Игрок не спавнится — камера управляется напрямую.
-    /// Использует новую систему ввода Unity (Input System) с событиями performed/canceled.
+    /// Камера для режима Point-and-Click с отладкой ввода и границ.
     /// </summary>
     public class PointAndClickCamera : MonoBehaviour
     {
-        [Header("Перемещение клавишами")]
-        [SerializeField] private float _moveSpeed = 10f;
-        [SerializeField] private bool _allowKeyboardMove = true;
-
-        [Header("Перемещение к краям экрана")]
-        [SerializeField] private bool _allowEdgeScroll = true;
-        [SerializeField] private float _edgeThickness = 20f;
+        [Header("Скорость движения")]
+        [SerializeField] private float _moveSpeed = 5f;
+        [SerializeField] private float _edgeScrollThreshold = 20f; // Пикселей от края
         [SerializeField] private float _edgeScrollSpeed = 8f;
 
-        [Header("Ограничения камеры")]
-        [SerializeField] private bool _useBounds = false;
-        [SerializeField] private Vector2 _minBounds = new Vector2(-50f, -50f);
-        [SerializeField] private Vector2 _maxBounds = new Vector2(50f, 50f);
-
-        [Header("Зум колесом")]
-        [SerializeField] private bool _allowZoom = true;
+        [Header("Зум")]
         [SerializeField] private float _zoomSpeed = 2f;
-        [SerializeField] private float _minSize = 5f;
-        [SerializeField] private float _maxSize = 30f;
+        [SerializeField] private float _minZoom = 5f;
+        [SerializeField] private float _maxZoom = 20f;
 
-        private Camera _camera;
-        private Vector3 _velocity;
-        
-        // Новая система ввода
-        private InputAction _moveAction;
+        [Header("Границы уровня (XZ плоскость)")]
+        [Tooltip("Камера не выйдет за эти границы по X и Z.")]
+        [SerializeField] private Bounds _levelBounds = new Bounds(Vector3.zero, new Vector3(20, 0, 20));
+
+        private Camera _cam;
         private Vector2 _moveInput;
+
+        // Input Actions
+        private InputAction _moveAction;
 
         private void Awake()
         {
-            _camera = GetComponent<Camera>();
-            if (_camera == null)
+            _cam = GetComponent<Camera>();
+            if (_cam == null) _cam = Camera.main;
+
+            if (_levelBounds.extents == Vector3.zero)
             {
-                Debug.LogError("[PointAndClickCamera] Камера не найдена на этом GameObject!");
+                _levelBounds = new Bounds(transform.position, new Vector3(50, 1, 50));
+                Debug.LogWarning("[PointAndClickCamera] Границы не заданы! Используется дефолт вокруг старта.");
             }
-            
-            // Инициализация действия движения, если оно еще не назначено через BindInput
-            if (_moveAction == null)
-            {
-                // Попытка найти стандартное действие "Move" в дефолтном ассете
-                var playerInput = GetComponent<PlayerInput>();
-                if (playerInput != null)
-                {
-                    _moveAction = playerInput.actions["Move"];
-                    SetupInputListeners();
-                }
-            }
+
+            Debug.Log($"[PointAndClickCamera] Инициализация. Границы: {_levelBounds}");
         }
 
-        /// <summary>
-        /// Привязка действия движения из новой системы ввода Unity.
-        /// Вызывать после инициализации Input Actions.
-        /// </summary>
         public void BindInput(InputAction moveAction)
         {
-            // Отписываемся от старого действия, если было
             if (_moveAction != null)
             {
                 _moveAction.performed -= OnMovePerformed;
@@ -75,112 +51,195 @@ namespace Core.Player
             }
 
             _moveAction = moveAction;
-            SetupInputListeners();
-            
-            // Если действие уже активно, считываем текущее значение
-            if (_moveAction != null && _moveAction.enabled)
+
+            if (_moveAction != null)
             {
-                _moveInput = _moveAction.ReadValue<Vector2>();
+                _moveAction.performed += OnMovePerformed;
+                _moveAction.canceled += OnMoveCanceled;
+                Debug.Log($"[PointAndClickCamera] Привязан Input Action: '{moveAction.name}'. Enabled: {moveAction.enabled}");
+
+                // Если действие уже активно (например, было включено до бинда), считаем текущее значение
+                if (moveAction.enabled)
+                {
+                    _moveInput = moveAction.ReadValue<Vector2>();
+                }
+            }
+            else
+            {
+                Debug.LogError("[PointAndClickCamera] Input Action НЕ привязан (null)! Проверь Bootstrap.");
             }
         }
 
-        private void SetupInputListeners()
-        {
-            if (_moveAction == null) return;
-            
-            _moveAction.performed += OnMovePerformed;
-            _moveAction.canceled += OnMoveCanceled;
-        }
-
-        // Обработка нажатия и изменения значения
-        private void OnMovePerformed(InputAction.CallbackContext ctx) 
+        private void OnMovePerformed(InputAction.CallbackContext ctx)
         {
             _moveInput = ctx.ReadValue<Vector2>();
+#if UNITY_EDITOR
+            if (_moveInput != Vector2.zero)
+                Debug.Log($"[DEBUG INPUT] Получено движение: {_moveInput}");
+#endif
         }
 
-        // Обработка отпускания клавиш
-        private void OnMoveCanceled(InputAction.CallbackContext ctx) 
+        private void OnMoveCanceled(InputAction.CallbackContext ctx)
         {
             _moveInput = Vector2.zero;
+#if UNITY_EDITOR
+            Debug.Log("[DEBUG INPUT] Движение сброшено в 0");
+#endif
         }
 
         private void Update()
         {
-            HandleKeyboardMove();
-            HandleEdgeScroll();
+            // Отладка: если нажаты клавиши, но инпут пустой
+#if UNITY_EDITOR
+            if ((Keyboard.current.wKey.isPressed || Keyboard.current.sKey.isPressed ||
+                 Keyboard.current.aKey.isPressed || Keyboard.current.dKey.isPressed) && _moveInput == Vector2.zero)
+            {
+                Debug.LogWarning("[DEBUG INPUT] Клавиши WASD нажаты, но Input Action молчит! Проверь маппинг в .inputactions и вызов Enable().");
+            }
+#endif
+
+            HandleMovement();
             HandleZoom();
-            ApplyBounds();
         }
 
-        private void HandleKeyboardMove()
+        private void HandleMovement()
         {
-            if (!_allowKeyboardMove) return;
+            Vector3 moveDir = Vector3.zero;
+            bool isEdgeScrolling = false;
 
+            // 1. Движение от клавиатуры (WASD)
             if (_moveInput.sqrMagnitude > 0.01f)
             {
-                // _moveInput.x = влево/вправо, _moveInput.y = вверх/вниз
-                Vector3 move = new Vector3(_moveInput.x, _moveInput.y, 0);
-                transform.position += move.normalized * _moveSpeed * Time.deltaTime;
+                // В Input System Y обычно смотрит вверх, а в Unity Z вперед. 
+                // Зависит от настроек Control Scheme, но обычно Move это (x, y) -> (Right, Up).
+                // Нам нужно (x, z).
+                moveDir += new Vector3(_moveInput.x, 0, _moveInput.y);
+
+#if UNITY_EDITOR
+                // Лог только один раз при начале движения, чтобы не спамить
+                if (Time.frameCount % 60 == 0)
+                    Debug.Log($"[DEBUG MOVE] WASD активны. Вектор: {moveDir}");
+#endif
             }
-        }
 
-        private void HandleEdgeScroll()
-        {
-            if (!_allowEdgeScroll) return;
+            // 2. Движение от краев экрана (Edge Scrolling)
+            Vector2 mousePos = Mouse.current.position.ReadValue();
+            float screenWidth = Screen.width;
+            float screenHeight = Screen.height;
 
-            Vector3 move = Vector3.zero;
-            var mousePos = Mouse.current.position.ReadValue();
-            var screenWidth = Screen.width;
-            var screenHeight = Screen.height;
-
-            if (mousePos.x < _edgeThickness) move += Vector3.left;
-            if (mousePos.x > screenWidth - _edgeThickness) move += Vector3.right;
-            if (mousePos.y < _edgeThickness) move += Vector3.down;
-            if (mousePos.y > screenHeight - _edgeThickness) move += Vector3.up;
-
-            if (move.sqrMagnitude > 0)
+            // Проверка на выход мыши за пределы окна (иногда бывает при полноэкранном режиме)
+            if (mousePos.x < 0 || mousePos.x > screenWidth || mousePos.y < 0 || mousePos.y > screenHeight)
             {
-                transform.position += move.normalized * _edgeScrollSpeed * Time.deltaTime;
+                // Мышь вне окна, игнорируем edge scroll
+            }
+            else
+            {
+                if (mousePos.x < _edgeScrollThreshold)
+                {
+                    moveDir += Vector3.left;
+                    isEdgeScrolling = true;
+                }
+                if (mousePos.x > screenWidth - _edgeScrollThreshold)
+                {
+                    moveDir += Vector3.right;
+                    isEdgeScrolling = true;
+                }
+                if (mousePos.y < _edgeScrollThreshold)
+                {
+                    moveDir += Vector3.back;
+                    isEdgeScrolling = true;
+                }
+                if (mousePos.y > screenHeight - _edgeScrollThreshold)
+                {
+                    moveDir += Vector3.forward;
+                    isEdgeScrolling = true;
+                }
+            }
+
+            if (moveDir.sqrMagnitude > 0.001f)
+            {
+                moveDir.Normalize();
+
+                // Ускоряем движение у краев
+                float currentSpeed = isEdgeScrolling ? _edgeScrollSpeed : _moveSpeed;
+
+                Vector3 displacement = moveDir * (currentSpeed * Time.deltaTime);
+
+#if UNITY_EDITOR
+                if (isEdgeScrolling && Time.frameCount % 30 == 0)
+                    Debug.Log($"[DEBUG EDGE] Скролл у края экрана. Дирекция: {moveDir}");
+#endif
+
+                MoveWithBounds(displacement);
             }
         }
 
         private void HandleZoom()
         {
-            if (!_allowZoom || _camera.orthographic == false) return;
+            float scroll = Mouse.current.scroll.ReadValue().y;
 
-            var scroll = Mouse.current?.scroll.ReadValue().y ?? 0f;
-            
-            if (Mathf.Abs(scroll) > 0.01f)
+            if (Mathf.Abs(scroll) > 0.1f)
             {
-                float newSize = _camera.orthographicSize - scroll * _zoomSpeed;
-                _camera.orthographicSize = Mathf.Clamp(newSize, _minSize, _maxSize);
+                float zoomAmount = -scroll * _zoomSpeed * Time.deltaTime;
+                float newZoom = _cam.orthographicSize + zoomAmount;
+                float clampedZoom = Mathf.Clamp(newZoom, _minZoom, _maxZoom);
+
+                if (!Mathf.Approximately(_cam.orthographicSize, clampedZoom))
+                {
+                    _cam.orthographicSize = clampedZoom;
+#if UNITY_EDITOR
+                    Debug.Log($"[DEBUG ZOOM] Новый зум: {clampedZoom}");
+#endif
+                }
             }
         }
 
-        private void ApplyBounds()
+        private void MoveWithBounds(Vector3 displacement)
         {
-            if (!_useBounds) return;
+            Vector3 newPos = transform.position + displacement;
 
-            Vector3 pos = transform.position;
-            pos.x = Mathf.Clamp(pos.x, _minBounds.x, _maxBounds.x);
-            pos.y = Mathf.Clamp(pos.y, _minBounds.y, _maxBounds.y);
-            transform.position = pos;
+            // Ограничение по X
+            float minX = _levelBounds.min.x;
+            float maxX = _levelBounds.max.x;
+
+            // Ограничение по Z
+            float minZ = _levelBounds.min.z;
+            float maxZ = _levelBounds.max.z;
+
+            float oldX = transform.position.x;
+            float oldZ = transform.position.z;
+
+            newPos.x = Mathf.Clamp(newPos.x, minX, maxX);
+            newPos.z = Mathf.Clamp(newPos.z, minZ, maxZ);
+            newPos.y = transform.position.y; // Сохраняем высоту
+
+            // Лог, если уперлись в границу
+#if UNITY_EDITOR
+            if (!Mathf.Approximately(newPos.x, oldX + displacement.x) ||
+                !Mathf.Approximately(newPos.z, oldZ + displacement.z))
+            {
+                Debug.Log($"[DEBUG BOUNDS] Уперлись в границу! Было ({oldX}, {oldZ}), стало ({newPos.x}, {newPos.z}). Границы: X[{minX}:{maxX}], Z[{minZ}:{maxZ}]");
+            }
+#endif
+
+            transform.position = newPos;
         }
 
         private void OnEnable()
         {
-            // Восстанавливаем подписку при активации
             if (_moveAction != null)
             {
-                SetupInputListeners();
+                _moveAction.Enable(); // Важно! Включаем действие
+                _moveAction.performed += OnMovePerformed;
+                _moveAction.canceled += OnMoveCanceled;
             }
         }
 
         private void OnDisable()
         {
-            // Важно отключать подписку при дезактивации объекта
             if (_moveAction != null)
             {
+                _moveAction.Disable();
                 _moveAction.performed -= OnMovePerformed;
                 _moveAction.canceled -= OnMoveCanceled;
             }
@@ -193,6 +252,19 @@ namespace Core.Player
                 _moveAction.performed -= OnMovePerformed;
                 _moveAction.canceled -= OnMoveCanceled;
             }
+        }
+
+        // ВИЗУАЛИЗАЦИЯ ГРАНИЦ В РЕДАКТОРЕ
+        private void OnDrawGizmosSelected()
+        {
+            // Рисуем желтый каркас границ
+            Gizmos.color = Color.yellow;
+            Gizmos.matrix = Matrix4x4.TRS(_levelBounds.center, Quaternion.identity, Vector3.one);
+            Gizmos.DrawWireCube(Vector3.zero, _levelBounds.size);
+
+            // Подписываем
+            Gizmos.color = Color.white;
+            Gizmos.DrawLine(_levelBounds.center, _levelBounds.center + Vector3.up * 2);
         }
     }
 }

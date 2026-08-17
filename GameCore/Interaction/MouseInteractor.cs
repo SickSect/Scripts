@@ -1,154 +1,233 @@
-using Core.Common;
-using Core.DI;
-using R3;
+using System;
 using UnityEngine;
+using UnityEngine.InputSystem;
+using R3;
+using Core.DI;
+using Core.Common;
 
 namespace Core.Interaction
 {
     /// <summary>
-    /// Обрабатывает взаимодействие через клик мышкой: по нажатию пускает рейкаст
-    /// из камеры в точку курсора и, если попал на объект с IInteractable, вызывает Interact().
-    ///
-    /// Единая точка для всех взаимодействий через клик: двери, предметы и т.д.
-    /// Вешается на камеру или отдельный GameObject на сцене.
+    /// Обрабатывает клики мыши по интерактивным объектам.
+    /// ТЕКУЩАЯ ВЕРСИЯ: С упором на отладку координат и механику "Взял-Бросил".
     /// </summary>
     public class MouseInteractor : MonoBehaviour
     {
-        [Header("Настройки рейкаста")]
-        [SerializeField] private float _maxDistance = 100f;
-        [SerializeField] private LayerMask _interactableMask = ~0;
-
-        [Header("Курсор")]
-        [SerializeField] private Texture2D _cursorTexture;
-        [SerializeField] private Vector2 _cursorHotspot = Vector2.zero;
+        [Header("Настройки перетаскивания")]
+        [Tooltip("Высота, на которой держится предмет относительно камеры")]
+        [SerializeField] private float _holdHeightOffset = 2.0f;
+        [Tooltip("С какой скоростью предмет следует за мышью (плавность)")]
+        [SerializeField] private float _holdSmoothSpeed = 15f;
 
         private Camera _camera;
-        private InputAction _clickAction;
-        private DIContainer _root;
-        private GameObject _hoveredObject;
-        private IInteractable _hoveredInteractable;
+        private IInteractable _currentHovered;
 
-        public ReactiveProperty<GameObject> HoveredObject { get; } = new(null);
-        public ReactiveProperty<string> HoveredPrompt { get; } = new(null);
+        // Логика удержания предмета
+        private IHoldable _heldObject;
+        private Vector3 _holdVelocity;
+
+        // События для UI
+        public ReactiveProperty<string> HoveredPrompt { get; } = new(string.Empty);
+        public event Action<IInteractable> OnHoverEnter;
+        public event Action OnHoverExit;
+        public event Action<IInteractable> OnClick;
+
+        private InputAction _interactAction;
 
         private void Awake()
         {
             _camera = Camera.main;
-            if (_camera == null)
-            {
-                Debug.LogError("[MouseInteractor] Camera.main не найдена!");
-            }
         }
 
-        /// <summary>
-        /// Привязка через GameInput (новая система ввода Unity)
-        /// </summary>
-        public void Bind(Core.Input.GameInput gameInput, DIContainer root)
+        public void Bind(InputAction interactAction, DIContainer container)
         {
-            _root = root;
-            
-            if (gameInput?.Actions?.Player?.Interact != null)
+            if (_interactAction != null)
             {
-                _clickAction = gameInput.Actions.Player.Interact;
-                _clickAction.performed += OnClick;
-                CoreLog.Debug($"[MouseInteractor] привязан к экшену Player.Interact, enabled={_clickAction.enabled}");
+                _interactAction.performed -= OnInteractPerformed;
             }
-            else
-            {
-                Debug.LogWarning("[MouseInteractor] Экшен Player.Interact не найден в GameInput");
-            }
-        }
 
-        /// <summary>
-        /// Старый метод Bind для обратной совместимости (помечен как устаревший)
-        /// </summary>
-        [System.Obsolete("Используйте Bind(GameInput, DIContainer) вместо этого метода")]
-        public void Bind(InputAction clickAction, DIContainer root)
-        {
-            _root = root;
-            _clickAction = clickAction;
-            _clickAction.performed += OnClick;
-            CoreLog.Debug($"[MouseInteractor] привязан к экшену: {clickAction?.name}, enabled={clickAction?.enabled}");
+            _interactAction = interactAction;
+
+            if (_interactAction != null)
+            {
+                _interactAction.performed += OnInteractPerformed;
+                CoreLog.Debug($"[MouseInteractor] Bind: {interactAction.name}, Enabled={interactAction.enabled}");
+            }
         }
 
         private void Update()
         {
+            if (_camera == null)
+            {
+                if (_currentHovered != null) ClearHover();
+                return;
+            }
+
             UpdateHover();
+            UpdateHeldObject();
         }
 
         private void UpdateHover()
         {
-            var ray = _camera.ScreenPointToRay(Mouse.current.position.ReadValue());
-            
-            if (Physics.Raycast(ray, out var hit, _maxDistance, _interactableMask))
+            Vector2 mousePos = Mouse.current.position.ReadValue();
+            Ray ray = _camera.ScreenPointToRay(mousePos);
+
+            // Лог для отладки рейкаста (можно закомментировать, если слишком много шума)
+            // Debug.Log($"[Raycast] Pos: {mousePos}, Dir: {ray.direction}");
+
+            if (Physics.Raycast(ray, out RaycastHit hit, 100f))
             {
-                var go = hit.collider.gameObject;
-                var interactable = go.GetComponentInParent<IInteractable>();
+                // Пробуем найти интерактивный объект
+                IInteractable interactable = hit.collider.GetComponentInParent<IInteractable>();
+
+                // Если это не интерактивный объект, но мы держим что-то другое, просто игнорируем ховер
+                // Но если мы хотим видеть подсказку только над интерактивными - ок.
 
                 if (interactable != null)
                 {
-                    if (_hoveredObject != go)
+                    if (_currentHovered != interactable)
                     {
-                        _hoveredObject = go;
-                        _hoveredInteractable = interactable;
-                        HoveredObject.Value = go;
-                        HoveredPrompt.Value = interactable.Prompt;
-                        CoreLog.Debug($"[MouseInteractor] наведение на {go.name} ({interactable.Prompt})");
+                        SetHover(interactable);
                     }
                 }
                 else
                 {
-                    ClearHover();
+                    if (_currentHovered != null)
+                    {
+                        ClearHover();
+                    }
                 }
             }
             else
             {
-                ClearHover();
+                if (_currentHovered != null) ClearHover();
             }
+        }
+
+        private void UpdateHeldObject()
+        {
+            if (_heldObject == null) return;
+
+            // Получаем текущую позицию мыши в мире
+            Vector2 mousePos = Mouse.current.position.ReadValue();
+            Ray ray = _camera.ScreenPointToRay(mousePos);
+
+            // Цель: точка на расстоянии _holdHeightOffset от камеры вдоль луча
+            Vector3 targetPos = ray.GetPoint(_holdHeightOffset);
+
+            // Плавное движение к цели (чтобы не дергалось)
+            Vector3 newPos = Vector3.SmoothDamp(_heldObject.Transform.position, targetPos, ref _holdVelocity, 1f / _holdSmoothSpeed);
+
+            _heldObject.Transform.position = newPos;
+
+            // Важно: оставляем вращение как есть или сбрасываем, чтобы предмет не крутился wildly
+            // Можно добавить выравнивание, если нужно: _heldObject.Transform.rotation = Quaternion.identity;
+        }
+
+        private void SetHover(IInteractable interactable)
+        {
+            _currentHovered = interactable;
+            string prompt = (interactable as MonoBehaviour)?.gameObject.name ?? "Interact";
+            HoveredPrompt.Value = prompt;
+            OnHoverEnter?.Invoke(interactable);
+            // CoreLog.Debug($"[HOVER] {prompt}");
         }
 
         private void ClearHover()
         {
-            if (_hoveredObject != null)
-            {
-                CoreLog.Debug($"[MouseInteractor] уход с {_hoveredObject.name}");
-                _hoveredObject = null;
-                _hoveredInteractable = null;
-                HoveredObject.Value = null;
-                HoveredPrompt.Value = null;
-            }
+            var old = _currentHovered;
+            _currentHovered = null;
+            HoveredPrompt.Value = string.Empty;
+            OnHoverExit?.Invoke();
         }
 
-        private void OnClick(InputAction.CallbackContext ctx)
+        private void OnInteractPerformed(UnityEngine.InputSystem.InputAction.CallbackContext ctx)
         {
-            if (_hoveredInteractable == null)
+            Vector2 mousePos = Mouse.current.position.ReadValue();
+
+            // ЛОГИКА "ВЗЯЛ-БРОСИЛ"
+            if (_heldObject != null)
             {
-                CoreLog.Debug("[MouseInteractor] клик, но под курсором нет интерактивного объекта");
+                // Если уже держим предмет - бросаем его
+                DropObject();
                 return;
             }
 
-            CoreLog.Debug($"[MouseInteractor] взаимодействие с {_hoveredObject.name} ({_hoveredInteractable.Prompt})");
-            _hoveredInteractable.Interact(new InteractionContext(gameObject, _root));
+            // Если не держим - пытаемся взять
+            Ray ray = _camera.ScreenPointToRay(mousePos);
+            if (Physics.Raycast(ray, out RaycastHit hit, 100f))
+            {
+                IHoldable holdable = hit.collider.GetComponentInParent<IHoldable>();
+                if (holdable != null)
+                {
+                    CoreLog.Debug($"[PICKUP] Попытка взять: {holdable.Transform.name}");
+                    PickUpObject(holdable);
+                    return;
+                }
+            }
+
+            // ЛОГИКА ОБЫЧНОГО ВЗАИМОДЕЙСТВИЯ (если не взяли предмет)
+            if (_currentHovered != null)
+            {
+                CoreLog.Debug($"[INTERACT] Клик по: {_currentHovered.GetType().Name}");
+                _currentHovered.Interact(new InteractionContext(this.gameObject, null));
+                OnClick?.Invoke(_currentHovered);
+            }
+            else
+            {
+                CoreLog.Debug("[CLICK] Пустой клик (ничего не задето)");
+            }
+        }
+
+        private void PickUpObject(IHoldable holdable)
+        {
+            _heldObject = holdable;
+
+            // Отключаем физику, чтобы предмет не падал и не коллизился
+            if (holdable.Rigidbody != null)
+            {
+                holdable.Rigidbody.isKinematic = true;
+                holdable.Rigidbody.linearVelocity = Vector3.zero;
+                holdable.Rigidbody.angularVelocity = Vector3.zero;
+            }
+
+            holdable.OnPickUp();
+            CoreLog.Debug($"[SYSTEM] Предмет взят: {holdable.Transform.name}");
+
+            // Сбрасываем ховер, чтобы не мелькала подсказка на предмете, который мы тащим
+            ClearHover();
+        }
+
+        private void DropObject()
+        {
+            if (_heldObject == null) return;
+
+            var obj = _heldObject;
+
+            // Включаем физику обратно
+            if (obj.Rigidbody != null)
+            {
+                obj.Rigidbody.isKinematic = false;
+                // Можно добавить небольшой импульс вперед, если нужно "бросать"
+                // obj.Rigidbody.velocity = _holdVelocity * 2f; 
+            }
+
+            obj.OnDrop();
+            CoreLog.Debug($"[SYSTEM] Предмет брошен: {obj.Transform.name}");
+
+            _heldObject = null;
         }
 
         private void OnDestroy()
         {
-            if (_clickAction != null) _clickAction.performed -= OnClick;
-            HoveredObject.Dispose();
-            HoveredPrompt.Dispose();
-        }
-
-        private void OnEnable()
-        {
-            if (_cursorTexture != null)
+            if (_interactAction != null)
             {
-                Cursor.SetCursor(_cursorTexture, _cursorHotspot, CursorMode.Auto);
+                _interactAction.performed -= OnInteractPerformed;
             }
-        }
+            HoveredPrompt.Dispose();
 
-        private void OnDisable()
-        {
-            Cursor.SetCursor(null, Vector2.zero, CursorMode.Auto);
+            // Если игра выключается, а предмет в руке - бросаем его (на всякий случай)
+            if (_heldObject != null) DropObject();
         }
     }
 }

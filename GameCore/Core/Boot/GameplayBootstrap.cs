@@ -25,9 +25,6 @@ namespace Core.Boot
         [SerializeField] private PlayerMovement _playerPrefab;
         [SerializeField] private Core.Stats.StatDefinition _staminaStat; // стат выносливости для движения
         
-        [Header("Point-and-Click режим")]
-        [Tooltip("Если true, игрок не спавнится, используется камера с управлением мышью")]
-        [SerializeField] private bool _pointAndClickMode = false;
         // Камера теперь настраивается автоматически через ClickInteractionInitStep
 
         // Объекты, которые этот bootstrap создал и должен убрать при уничтожении сцены.
@@ -78,40 +75,19 @@ namespace Core.Boot
             initializer.Add(new Core.Mail.UI.MailUIBridge());
             // Фазы: активация текущей фазы на сцене (спавн наполнения), Order 9.
             initializer.Add(new Core.Story.Phases.PhaseInitStep());
-
-            // Выбор режима инициализации: классический игрок или point-and-click
-            if (_pointAndClickMode)
-            {
-                // Point-and-click режим: без игрока, управление камерой и мышью
-                Debug.Log("[GameplayBootstrap] Инициализация point-and-click режима");
+   
+            Debug.Log("[GameplayBootstrap] Инициализация point-and-click режима");
                 
-                var input = ctx.Root.Resolve<Core.Input.GameInput>();
+            var input = ctx.Root.Resolve<Core.Input.GameInput>();
                 
-                // Инициализация взаимодействия через клик мыши (включая настройку камеры)
-                initializer.Add(new ClickInteractionInitStep(input));
-            }
-            else
-            {
-                // Классический режим с игроком
-                Debug.Log("[GameplayBootstrap] Инициализация классического режима с игроком");
-                
-                var input = ctx.Root.Resolve<Core.Input.GameInput>();
-                initializer.Add(new PlayerInitStep(_playerPrefab, input.Actions.Player.Move, input.Actions.Player.Look, input.Actions.Player.Interact, _staminaStat));
-
-                // Камера: привязка Cinemachine к игроку (после спавна игрока).
-                initializer.Add(new CameraInitStep());
-            }
+            // Инициализация взаимодействия через клик мыши (включая настройку камеры)
+            initializer.Add(new ClickInteractionInitStep(input));
 
             // Инвентарь: загрузка из снапшота + регистрация в сохранении.
             initializer.Add(new Core.Inventory.InventoryInitStep());
 
             // Звук: раздача AudioService компонентам сцены (Order 11).
             initializer.Add(new Core.Audio.AudioInitStep());
-
-            // Сюда механики добавляют свои шаги. Порядок задаётся через IInitStep.Order:
-            // initializer.Add(new GameTimeInitStep());
-            // initializer.Add(new GameUiInitStep());
-            // ...
 
             return initializer;
         }
@@ -133,16 +109,10 @@ namespace Core.Boot
             pause.Subscribe(_ =>
             {
                 input.SwitchToUI();
-                // В point-and-click режиме PlayerLook не используется
-                if (!_pointAndClickMode && ctx.Scene.TryResolve<Core.Player.PlayerLook>(out var look)) 
-                    look.SetEnabled(false);
             }).AddTo(_sceneDisposables);
             cont.Subscribe(_ =>
             {
                 input.SwitchToPlayer();
-                // В point-and-click режиме PlayerLook не используется
-                if (!_pointAndClickMode && ctx.Scene.TryResolve<Core.Player.PlayerLook>(out var look)) 
-                    look.SetEnabled(true);
             }).AddTo(_sceneDisposables);
         }
 

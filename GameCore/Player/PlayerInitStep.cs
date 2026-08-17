@@ -44,43 +44,6 @@ namespace Core.Player
             var stateService = ctx.Root.Resolve<GameStateService>();
 
             ctx.State.player ??= new PlayerData();
-
-            // Спавним на точке с сохранённым spawnId из состояния.
-            var go = loader.SpawnAt(_playerPrefab.gameObject, ctx.State.spawnId);
-
-            var movement = go.GetComponent<PlayerMovement>();
-            movement.BindInput(_moveAction);
-
-            // Выносливость: если есть система статов и указан стат — привязываем к движению.
-            if (_staminaStat != null && ctx.Root.TryResolve<Core.Stats.StatsService>(out var stats))
-                movement.BindStamina(stats.Get(_staminaStat));
-
-            // Взгляд мышью (если компонент есть на префабе).
-            var look = go.GetComponent<PlayerLook>();
-            if (look != null) look.BindInput(_lookAction);
-
-            // Взаимодействие через рейкаст (двери, предметы).
-            var interactor = go.GetComponent<Core.Interaction.PlayerInteractor>();
-            if (interactor != null) interactor.Bind(_interactAction, ctx.Root);
-
-            stateService.RegisterContributor(new PlayerStateContributor(movement));
-
-            ctx.Scene.RegisterInstance(movement);
-            if (look != null) ctx.Scene.RegisterInstance(look);
-
-            // HUD взаимодействия: связываем с LookTarget игрока прямо здесь
-            // (как было раньше — без отдельного init-шага).
-            var lookTarget = go.GetComponentInChildren<Core.Player.LookTarget>();
-            if (lookTarget != null)
-            {
-                var hud = UnityEngine.Object.FindAnyObjectByType<Core.UI.HUD.InteractionHUD>(FindObjectsInactive.Include);
-                if (hud != null) hud.SetTarget(lookTarget);
-                else Debug.LogWarning("[PlayerInitStep] InteractionHUD в сцене не найден.");
-            }
-            else
-            {
-                Debug.LogWarning("[PlayerInitStep] LookTarget на игроке не найден — хинт HUD работать не будет.");
-            }
         }
     }
 }
