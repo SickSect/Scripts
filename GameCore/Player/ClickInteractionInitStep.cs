@@ -92,7 +92,9 @@ namespace Core.Player
             }
 
             // 6. Подключаем HUD
-            var hud = Object.FindObjectOfType<ClickInteractionHUD>();
+            // ИСПРАВЛЕНИЕ: Используем FindAnyObjectByType вместо устаревшего FindObjectOfType
+            var hud = Object.FindAnyObjectByType<ClickInteractionHUD>();
+
             if (hud != null)
             {
                 hud.SetInteractor(interactor);
@@ -102,6 +104,7 @@ namespace Core.Player
             {
                 Debug.LogWarning("[ClickInteractionInitStep] ClickInteractionHUD не найден в сцене.");
             }
+
         }
     }
 }

@@ -2,157 +2,181 @@ using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Events;
 using Core.Interaction;
+using Core.Interaction.Interactables;
 
-namespace Core.Interaction.Interactables
+namespace Core.Carry
 {
-    /// <summary>
-    /// Зона для размещения переносимых объектов.
-    /// Проверяет наличие объектов, реализующих интерфейс ICarryable, внутри своего коллайдера-триггера.
-    /// </summary>
     [RequireComponent(typeof(Collider))]
     public class DropZone : MonoBehaviour
     {
         [Header("Настройки зоны")]
-        [Tooltip("Список тегов или имен объектов, которые зона принимает (опционально). Если пусто - принимает любой ICarryable.")]
-        [SerializeField] private string[] _acceptedTags;
+        [Tooltip("Уникальный ID зоны.")]
+        [SerializeField] private string _zoneId = "";
 
-        [Tooltip("Событие вызывается, когда в зоне появляется правильный предмет.")]
-        [SerializeField] private UnityEvent<GameObject> _onItemPlaced;
+        [Tooltip("Точка примагничивания.")]
+        [SerializeField] private Transform _dropTargetPoint;
 
-        [Tooltip("Событие вызывается, когда из зоны убирают предмет.")]
-        [SerializeField] private UnityEvent<GameObject> _onItemRemoved;
-
-        [Tooltip("Нужно ли уничтожать предмет после успешной доставки?")]
-        [SerializeField] private bool _destroyOnSuccess = false;
+        [Header("События")]
+        public UnityEvent<List<ScriptableObject>> OnDataDelivered;
 
         private Collider _zoneCollider;
-        private readonly List<ICarryable> _containedItems = new List<ICarryable>();
+        private readonly List<ScriptableObject> _storedData = new List<ScriptableObject>();
+        private ICarryable _heldItemInZone;
+
+        // Кэш Rigidbody предмета, чтобы не искать каждый кадр
+        private Rigidbody _heldRbCache;
 
         private void Awake()
         {
             _zoneCollider = GetComponent<Collider>();
 
+            // Важно: Коллайдер должен быть Триггером
             if (!_zoneCollider.isTrigger)
             {
-                Debug.LogWarning($"[DropZone] Коллайдер на объекте {name} не является триггером (Is Trigger = false). Зона не сможет детектировать предметы автоматически через OnTrigger. Установите Is Trigger = true.");
-                // Мы можем работать и без триггера через ручной вызов CheckCompletion, но лучше исправить в редакторе.
+                Debug.LogWarning($"[DropZone] Коллайдер на {name} НЕ является триггером! Установите Is Trigger = true.");
+            }
+
+            if (_dropTargetPoint == null)
+            {
+                GameObject pointObj = new GameObject($"{name}_DropPoint");
+                pointObj.transform.SetParent(transform);
+                pointObj.transform.localPosition = Vector3.zero;
+                _dropTargetPoint = pointObj.transform;
             }
         }
 
-        /// <summary>
-        /// Вызывается, когда объект попадает в триггер зоны (например, упал при броске).
-        /// </summary>
         private void OnTriggerEnter(Collider other)
         {
-            TryAddItem(other);
+            // Ищем переносимый объект
+            ICarryable carryable = other.GetComponentInParent<ICarryable>();
+            if (carryable == null) return;
+
+            // 1. Проверка ID зоны
+            if (!string.IsNullOrEmpty(_zoneId))
+            {
+                if (carryable is ICarryData dataCarrier)
+                {
+                    if (dataCarrier.TargetZoneId != _zoneId)
+                    {
+                        return; // ID не совпадает, игнорируем
+                    }
+                }
+                else
+                {
+                    // Если у объекта нет данных, но есть Carryable, можно проверить через каст, 
+                    // если Carryable сам хранит ZoneKey (зависит от вашей реализации Carryable)
+                    // Для надежности предположим, что Carryable тоже реализует проверку или имеет поле
+                    if (carryable is Carryable specificCarryable)
+                    {
+                        // Если в Carryable есть публичное свойство ZoneKey (добавьте его в Carryable если нет)
+                        // Пока используем рефлексию или просто пропускаем, если строгой проверки нет
+                        // ЛУЧШЕ: Добавьте свойство ZoneKey в интерфейс ICarryable или используйте ICarryData
+                    }
+                }
+            }
+
+            // 2. Извлечение данных
+            List<ScriptableObject> itemData = new List<ScriptableObject>();
+            if (carryable is ICarryData dataProvider)
+            {
+                var data = dataProvider.GetData();
+                if (data != null) itemData.AddRange(data);
+            }
+
+            // 3. Примагничивание и отключение физики
+            SnapToTarget(carryable);
+
+            _heldItemInZone = carryable;
+            _heldRbCache = carryable.Rigidbody;
+
+            if (_heldRbCache != null)
+            {
+                
+                _heldRbCache.linearVelocity = Vector3.zero;
+                _heldRbCache.isKinematic = true; // ОТКЛЮЧАЕМ ФИЗИКУ (предмет висит)
+                _heldRbCache.angularVelocity = Vector3.zero;
+            }
+
+            _storedData.AddRange(itemData);
+            Debug.Log($"[DropZone] '{_zoneId}' принял объект. Данные: {itemData.Count}. Физика отключена.");
+
+            OnDataDelivered?.Invoke(_storedData);
         }
 
-        /// <summary>
-        /// Вызывается, когда объект покидает триггер зоны (например, его подобрали обратно).
-        /// </summary>
         private void OnTriggerExit(Collider other)
         {
-            TryRemoveItem(other);
-        }
-
-        private void TryAddItem(Collider other)
-        {
-            // Ищем интерфейс ICarryable в иерархии объекта (вдруг он на родителе)
             ICarryable carryable = other.GetComponentInParent<ICarryable>();
 
-            if (carryable != null)
+            // Проверяем, тот ли это предмет, который держим
+            if (carryable == _heldItemInZone)
             {
-                // Проверка по тегам/именам, если настроено
-                if (!IsAccepted(carryable.Transform.gameObject))
-                {
-                    return;
-                }
-
-                if (!_containedItems.Contains(carryable))
-                {
-                    _containedItems.Add(carryable);
-                    Debug.Log($"[DropZone] Предмет добавлен: {carryable.Transform.name}. Всего предметов: {_containedItems.Count}");
-
-                    _onItemPlaced?.Invoke(carryable.Transform.gameObject);
-
-                    // Опционально: можно сразу проверять условие победы, если нужен ровно 1 предмет
-                    // CheckCompletion(); 
-                }
+                ReleaseItem();
             }
         }
 
-        private void TryRemoveItem(Collider other)
+        private void ReleaseItem()
         {
-            ICarryable carryable = other.GetComponentInParent<ICarryable>();
+            if (_heldItemInZone == null) return;
 
-            if (carryable != null && _containedItems.Contains(carryable))
+            Debug.Log($"[DropZone] Предмет покинул зону '{_zoneId}'. Возвращаем физику.");
+
+            if (_heldRbCache != null)
             {
-                _containedItems.Remove(carryable);
-                Debug.Log($"[DropZone] Предмет удален: {carryable.Transform.name}. Осталось: {_containedItems.Count}");
-
-                _onItemRemoved?.Invoke(carryable.Transform.gameObject);
+                _heldRbCache.isKinematic = false; // ВКЛЮЧАЕМ ФИЗИКУ (предмет падает)
             }
+
+            _heldItemInZone = null;
+            _heldRbCache = null;
+            // Данные можно очистить или оставить, зависит от логики игры
+            // _storedData.Clear(); 
         }
 
-        /// <summary>
-        /// Ручная проверка содержимого зоны.
-        /// Полезно, если физика триггеров сработала некорректно или предмет телепортировали.
-        /// </summary>
-        public void CheckCompletion()
+        private void SnapToTarget(ICarryable item)
         {
-            // Очищаем список от "мертвых" ссылок или предметов, которые физически уже не в зоне
-            _containedItems.RemoveAll(item => item == null || !IsInsideZone(item.Transform));
+            if (item == null || item.Transform == null) return;
 
-            // Логика проверки условия победы/задачи
-            if (_containedItems.Count > 0)
-            {
-                Debug.Log($"[DropZone] Проверка успешна. В зоне {_containedItems.Count} предметов.");
-
-                if (_destroyOnSuccess)
-                {
-                    foreach (var item in _containedItems)
-                    {
-                        Destroy(item.Transform.gameObject);
-                    }
-                    _containedItems.Clear();
-                }
-            }
-            else
-            {
-                Debug.Log("[DropZone] Зона пуста.");
-            }
+            item.Transform.position = _dropTargetPoint.position;
+            item.Transform.rotation = _dropTargetPoint.rotation;
         }
 
-        private bool IsAccepted(GameObject obj)
+        public List<ScriptableObject> GetStoredData() => new List<ScriptableObject>(_storedData);
+
+        public void ClearData()
         {
-            if (_acceptedTags == null || _acceptedTags.Length == 0)
-                return true;
-
-            foreach (string tag in _acceptedTags)
-            {
-                if (obj.CompareTag(tag) || obj.name.Contains(tag))
-                    return true;
-            }
-            return false;
+            ReleaseItem();
+            _storedData.Clear();
         }
 
-        private bool IsInsideZone(Transform itemTransform)
-        {
-            if (_zoneCollider == null) return false;
-
-            // Простая проверка через Bounds коллайдера
-            Bounds bounds = _zoneCollider.bounds;
-            return bounds.Contains(itemTransform.position);
-        }
-
-        // Отладка в редакторе
         private void OnDrawGizmosSelected()
         {
-            if (_zoneCollider != null)
+            if (_dropTargetPoint != null)
             {
                 Gizmos.color = Color.green;
-                Gizmos.DrawWireCube(_zoneCollider.bounds.center, _zoneCollider.bounds.size);
+                Gizmos.DrawSphere(_dropTargetPoint.position, 0.2f);
+
+                Gizmos.color = new Color(0, 1, 1, 0.3f);
+                if (_zoneCollider != null)
+                    Gizmos.DrawWireCube(_zoneCollider.bounds.center, _zoneCollider.bounds.size);
             }
         }
+
+        // Добавь этот метод в класс DropZone
+        public void ReleaseItemIfHeld(ICarryable item)
+        {
+            if (_heldItemInZone == item)
+            {
+                Debug.Log($"[DropZone] Освобождаю предмет {item.Transform.name} из зоны {_zoneId}");
+                _heldItemInZone = null;
+                // Мы НЕ телепортируем предмет обратно, он останется там, где его взяли мышкой.
+                // Физика включится в MouseInteractor при отпускании.
+            }
+        }
+    }
+
+
+    public interface ICarryData
+    {
+        string TargetZoneId { get; }
+        List<ScriptableObject> GetData();
     }
 }
