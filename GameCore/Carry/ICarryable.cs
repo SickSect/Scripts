@@ -1,4 +1,5 @@
-﻿using UnityEngine;
+﻿using System;
+using UnityEngine;
 
 namespace Core.Interaction
 {
@@ -15,5 +16,7 @@ namespace Core.Interaction
 
         /// <summary> Вызывается при броске. Включает физику. </summary>
         void OnDrop();
+
+        Boolean isPickupble();
     }
 }

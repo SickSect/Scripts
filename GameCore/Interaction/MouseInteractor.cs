@@ -4,25 +4,38 @@ using UnityEngine.InputSystem;
 using R3;
 using Core.DI;
 using Core.Interaction.Interactables;
-using Core.Carry;
+using Core.Common;
 
 namespace Core.Interaction
 {
+    /// <summary>
+    /// Обрабатывает клики мыши и перетаскивание объектов.
+    /// ЛОГИКА: 
+    /// 1. Подбор: Отключаем коллайдер предмета -> Зоны его игнорируют.
+    /// 2. Бросок: Включаем коллайдер -> Если внутри зоны, срабатывает OnTriggerEnter (один раз).
+    /// </summary>
     public class MouseInteractor : MonoBehaviour
     {
         [Header("Настройки перетаскивания")]
-        [SerializeField] private float _holdHeight = 1.5f; // Высота над землей (Y)
-        [SerializeField] private float _holdSmoothSpeed = 20f;
+        [Tooltip("Высота над землей (Y), на которой держится предмет.")]
+        [SerializeField] private float _holdHeight = 1.5f;
+
+        [Tooltip("Скорость следования предмета за мышью.")]
+        [SerializeField] private float _holdSmoothSpeed = 25f;
 
         [Header("Слои")]
         [Tooltip("Слои, которые рейкаст должен ИГНОРИРОВАТЬ (например, DropZoneLayer).")]
         [SerializeField] private LayerMask _ignoreLayers = 0;
 
+        [Header("Отладка")]
+        [Tooltip("Рисовать луч отладки в редакторе?")]
+        [SerializeField] private bool _debugRaycast = true;
+
         private Camera _camera;
         private IInteractable _currentHovered;
 
-        private ICarryable _heldObject;
         private Vector3 _holdVelocity;
+        private Collider _heldColliderCache;
 
         public ReactiveProperty<string> HoveredPrompt { get; } = new(string.Empty);
         public event Action<IInteractable> OnHoverEnter;
@@ -31,6 +44,9 @@ namespace Core.Interaction
 
         private InputAction _interactAction;
 
+        private Boolean _isHeldItem = false;
+        private Carryable _takenItem;
+
         private void Awake()
         {
             _camera = Camera.main;
@@ -38,12 +54,15 @@ namespace Core.Interaction
 
         public void Bind(InputAction interactAction, DIContainer container)
         {
-            if (_interactAction != null) _interactAction.performed -= OnInteractPerformed;
+            if (_interactAction != null)
+                _interactAction.performed -= OnInteractPerformed;
 
             _interactAction = interactAction;
+
             if (_interactAction != null)
             {
                 _interactAction.performed += OnInteractPerformed;
+                CoreLog.Debug($"[MouseInteractor] Привязан к действию: {interactAction.name}");
             }
         }
 
@@ -55,8 +74,20 @@ namespace Core.Interaction
                 return;
             }
 
-            UpdateHover();
-            UpdateHeldObjectPosition();
+            // Обновляем подсветку только если ничего не держим
+            if (_takenItem == null)
+            {
+                UpdateHover();
+            }
+        }
+
+        private void FixedUpdate()
+        {
+            // Если держим объект — двигаем его за мышью каждый кадр
+            if (_takenItem != null)
+            {
+                MoveObjectWithMouse();
+            }
         }
 
         private void UpdateHover()
@@ -64,7 +95,6 @@ namespace Core.Interaction
             Vector2 mousePos = Mouse.current.position.ReadValue();
             Ray ray = _camera.ScreenPointToRay(mousePos);
 
-            // ВАЖНО: Передаем маску игнорирования в рейкаст
             if (Physics.Raycast(ray, out RaycastHit hit, 100f, ~_ignoreLayers.value))
             {
                 IInteractable interactable = hit.collider.GetComponentInParent<IInteractable>();
@@ -81,31 +111,6 @@ namespace Core.Interaction
             else
             {
                 if (_currentHovered != null) ClearHover();
-            }
-        }
-
-        private void UpdateHeldObjectPosition()
-        {
-            if (_heldObject == null) return;
-
-            Vector2 mousePos = Mouse.current.position.ReadValue();
-            Ray ray = _camera.ScreenPointToRay(mousePos);
-
-            // Точка на высоте holdHeight от земли (плоскость Y = holdHeight)
-            // Плоскость: нормаль (0,1,0), расстояние до начала координат = holdHeight
-            Plane groundPlane = new Plane(Vector3.up, -_holdHeight);
-
-            if (groundPlane.Raycast(ray, out float enter))
-            {
-                Vector3 targetPos = ray.GetPoint(enter);
-                // Мгновенное перемещение или плавное? 
-                // Для точного следования за курсором лучше мгновенно, либо очень быстро
-                _heldObject.Transform.position = Vector3.SmoothDamp(
-                    _heldObject.Transform.position,
-                    targetPos,
-                    ref _holdVelocity,
-                    1f / _holdSmoothSpeed
-                );
             }
         }
 
@@ -127,82 +132,117 @@ namespace Core.Interaction
 
         private void OnInteractPerformed(UnityEngine.InputSystem.InputAction.CallbackContext ctx)
         {
-            if (_camera == null) return;
-
-            Vector2 mousePos = Mouse.current.position.ReadValue();
-
-            // ЛОГИКА "ВЗЯЛ-БРОСИЛ"
-            if (_heldObject != null)
-            {
-                DropObject();
-                return;
-            }
+            Vector2 mousePos = Mouse.current.position.value;
 
             Ray ray = _camera.ScreenPointToRay(mousePos);
 
-            // Если мы пытаемся взять предмет (ЛКМ по объекту)
             if (Physics.Raycast(ray, out RaycastHit hit, 100f))
             {
-                ICarryable holdable = hit.collider.GetComponentInParent<ICarryable>();
-
-                if (holdable != null)
+                Carryable carryable = hit.collider.GetComponentInParent<Carryable>();
+                if (carryable == null)
                 {
-                    // ПРОВЕРКА: Если предмет внутри DropZone, сообщаем зоне, что мы его забираем
-                    var zones = Physics.OverlapSphere(holdable.Transform.position, 0.1f); // Ищем коллайдеры рядом
-                    foreach (var zoneCol in zones)
-                    {
-                        var dropZone = zoneCol.GetComponent<DropZone>();
-                        if (dropZone != null)
-                        {
-                            dropZone.ReleaseItemIfHeld(holdable);
-                        }
-                    }
-
-                    // Теперь берем предмет
-                    PickUpObject(holdable);
+                    Debug.Log("[OnInteractPerformed] нет предмета взаимодействия");
                     return;
                 }
+                Debug.Log("[OnInteractPerformed] взаимодействуем с предметом " + carryable.name);
+
+                if (carryable.isPickupble())
+                {
+                    Debug.Log("[OnInteractPerformed] мы можем поднять предмет" + carryable.name);
+                    if (_isHeldItem)
+                    {
+                        _isHeldItem = false; // переводим состояние в "бросили объект и руки пусты"
+                        DropObject();
+                    }
+                    else if (!_isHeldItem)
+                    {
+                        _isHeldItem = true; // переводим состояние в "мы держим объект"
+                        Carryable takenItem = hit.collider.GetComponent<Carryable>(); // берем сам объект
+                        if (carryable != null)
+                        {
+                            Debug.Log("[OnInteractPerformed] Поднимаем " + carryable.name);
+                            PickUpObject(takenItem); // поднимаем объект
+                        }
+                    }
+                }
+                else
+                {
+                    Debug.Log("[OnInteractPerformed] мы НЕ можем поднять предмет" + carryable.name);
+                }
+            }
+            else
+            {
+                Debug.Log("[OnInteractPerformed] ничего не произошло, предмета нет");
             }
 
-            // Обычное взаимодействие
-            if (_currentHovered != null)
-            {
-                _currentHovered.Interact(null);
-                OnClick?.Invoke(_currentHovered);
-            }
         }
 
-        private void PickUpObject(ICarryable holdable)
+        private void PickUpObject(Carryable carryable)
         {
-            _heldObject = holdable;
-            if (holdable.Rigidbody != null)
+            Debug.Log("[OnInteractPerformed] PickUpObject " + carryable.name);
+            _takenItem = carryable;
+            if (_takenItem != null)
             {
-                holdable.Rigidbody.isKinematic = true;
-                holdable.Rigidbody.angularVelocity = Vector3.zero;
+                carryable.Rigidbody.isKinematic = true; // Главное: отключаем симуляцию
+                carryable.Rigidbody.linearVelocity = Vector3.zero; // зануляем скорость
+                carryable.Rigidbody.angularVelocity = Vector3.zero;
             }
-            holdable.OnPickUp();
             ClearHover();
+            carryable.OnPickUp();
         }
 
         private void DropObject()
         {
-            if (_heldObject == null) return;
-            var obj = _heldObject;
+            if (_takenItem == null) return;
+            Carryable carryable = _takenItem as Carryable;
+            Debug.Log("[OnInteractPerformed] DropObject " + carryable.name);
+            // ВКЛЮЧАЕМ ФИЗИКУ ОБРАТНО
+            if (carryable.Rigidbody != null)
+                carryable.Rigidbody.isKinematic = false; // Включаем симуляцию (предмет упадет)
+            // Визуальный эффект
+            carryable.OnDrop();
+            _takenItem = null;
+            _heldColliderCache = null;
+        }
 
-            if (obj.Rigidbody != null)
+        private void MoveObjectWithMouse()
+        {
+            Vector2 mousePos = Mouse.current.position.value;
+            Ray ray = _camera.ScreenPointToRay(mousePos);
+            Plane groundPlane = new Plane(Vector3.up, -_holdHeight);
+            if (groundPlane.Raycast(ray, out float enter))
             {
-                obj.Rigidbody.isKinematic = false;
+                Vector3 targetPos = ray.GetPoint(enter);
+                _takenItem.Transform.position = Vector3.SmoothDamp(
+                _takenItem.Transform.position,
+                targetPos,
+                ref _holdVelocity,
+                0.1f // Время сглаживания (меньше = быстрее/жестче)
+            );
             }
-
-            obj.OnDrop();
-            _heldObject = null;
         }
 
         private void OnDestroy()
         {
-            if (_interactAction != null) _interactAction.performed -= OnInteractPerformed;
+            if (_interactAction != null)
+                _interactAction.performed -= OnInteractPerformed;
+
             HoveredPrompt.Dispose();
-            if (_heldObject != null) DropObject();
+
+            if (_takenItem != null)
+                DropObject();
+        }
+
+        // Визуализация луча в редакторе постоянно, если включена отладка
+        private void OnDrawGizmos()
+        {
+            if (!_debugRaycast || _camera == null) return;
+
+            Vector2 mousePos = Mouse.current != null ? Mouse.current.position.ReadValue() : new Vector2(Screen.width / 2, Screen.height / 2);
+            Ray ray = _camera.ScreenPointToRay(mousePos);
+
+            Gizmos.color = Color.magenta;
+            Gizmos.DrawLine(ray.origin, ray.origin + ray.direction * 50f);
         }
     }
 }
